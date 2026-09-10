@@ -1,0 +1,9 @@
+stage,unit,count
+Rows in matched analysis file,Rows,752412
+Distinct dealing-address sale identifiers,Sales,491093
+Rows satisfying the original price and area restrictions,Rows,520831
+Latest eligible dealing-address sales,Sales,343821
+Excluded sales with conflicting model inputs,Sales,2965
+Final unambiguous validation sample,Sales,340856
+Final houses,Sales,281621
+Final apartments,Sales,59235

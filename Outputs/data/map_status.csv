@@ -1,0 +1,2 @@
+status,source,note
+generated from coordinates,Data/Analysis/transactions_with_GNAF_and_amenities_2022_2025_nsw_updated_20260726.gpkg,Offline ggplot2/sf map over the ABS 2021 NSW state boundary; no web-map API required.

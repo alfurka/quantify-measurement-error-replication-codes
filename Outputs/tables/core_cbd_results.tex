@@ -1,0 +1,29 @@
+\begin{table}[!htbp]
+\centering
+\caption{CBD Distance: Exact and Centroid-Based Results}
+\label{tab:core-cbd}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllllllll}
+Geography & Property type & Fixed effects & Exact coordinate & Centroid proxy & Gap $\Delta$ & Relative change (\%) & Paired 95\% CI & FE absorption (\%) & N \\
+SA1 & House & No FE & -0.3087 (0.0009) & -0.3087 (0.0009) & -0.0000 & 0.0 & [-0.0001, 0.0001] &  & 281,194 \\
+SA1 & House & SA3 & -0.1914 (0.0475) & -0.1924 (0.0478) & -0.0010 & 0.5 & [-0.0035, 0.0014] & 99.1 & 281,194 \\
+SA1 & House & SA4 & -0.3277 (0.0468) & -0.3277 (0.0469) & 0.0000 & -0.0 & [-0.0007, 0.0007] & 96.3 & 281,194 \\
+SA1 & Apartment & No FE & -0.1929 (0.0016) & -0.1929 (0.0016) & -0.0000 & 0.0 & [-0.0003, 0.0002] &  & 58,217 \\
+SA1 & Apartment & SA3 & -0.1974 (0.0692) & -0.1956 (0.0660) & 0.0017 & -0.9 & [-0.0023, 0.0054] & 97.3 & 58,216 \\
+SA1 & Apartment & SA4 & -0.2724 (0.0258) & -0.2709 (0.0259) & 0.0015 & -0.5 & [-0.0009, 0.0039] & 93.6 & 58,216 \\
+SA2 & House & No FE & -0.3087 (0.0009) & -0.3092 (0.0009) & -0.0005 & 0.2 & [-0.0014, 0.0004] &  & 281,194 \\
+SA2 & House & SA3 & -0.1914 (0.0475) & -0.1977 (0.0474) & -0.0063 & 3.3 & [-0.0235, 0.0111] & 99.1 & 281,194 \\
+SA2 & House & SA4 & -0.3277 (0.0468) & -0.3284 (0.0450) & -0.0007 & 0.2 & [-0.0077, 0.0068] & 96.3 & 281,194 \\
+SA2 & Apartment & No FE & -0.1929 (0.0016) & -0.1930 (0.0016) & -0.0001 & 0.1 & [-0.0021, 0.0018] &  & 58,217 \\
+SA2 & Apartment & SA3 & -0.1974 (0.0692) & -0.2177 (0.0557) & -0.0204 & 10.3 & [-0.0445, 0.0031] & 97.3 & 58,216 \\
+SA2 & Apartment & SA4 & -0.2724 (0.0258) & -0.2743 (0.0201) & -0.0019 & 0.7 & [-0.0158, 0.0110] & 93.4 & 58,216 \\
+Postcode & House & No FE & -0.3086 (0.0009) & -0.3097 (0.0009) & -0.0011 & 0.4 & [-0.0040, 0.0017] &  & 281,076 \\
+Postcode & House & SA3 & -0.1911 (0.0475) & -0.1829 (0.0410) & 0.0082 & -4.3 & [-0.0247, 0.0434] & 98.8 & 281,076 \\
+Postcode & House & SA4 & -0.3276 (0.0468) & -0.3088 (0.0449) & 0.0188 & -5.7 & [-0.0016, 0.0386] & 95.9 & 281,076 \\
+Postcode & Apartment & No FE & -0.1929 (0.0016) & -0.1786 (0.0015) & 0.0143 & -7.4 & [-0.0049, 0.0336] &  & 58,204 \\
+Postcode & Apartment & SA3 & -0.1974 (0.0692) & -0.1124 (0.0087) & 0.0851 & -43.1 & [-0.0077, 0.1799] & 91.7 & 58,203 \\
+Postcode & Apartment & SA4 & -0.2725 (0.0258) & -0.1634 (0.0367) & 0.1091 & -40.0 & [0.0430, 0.1736] & 86.9 & 58,203 \\
+\end{tabular}
+}
+\par\smallskip{\footnotesize\raggedright\textit{Notes}: $\Delta=\widehat\beta_{centroid}- \widehat\beta_{exact}$. Relative change is $100(\widehat\beta_{centroid}/ \widehat\beta_{exact}-1)$. Coefficient-specific standard errors are in parentheses. The confidence interval is for $\Delta$ and uses 999 paired one-way spatial-cluster multiplier draws. FE absorption is the percentage of proxy variation jointly absorbed by the stated spatial and month-by-year fixed effects.\par}
+\end{table}

@@ -1,0 +1,23 @@
+\begin{table}[!htbp]
+\centering
+\caption{Regressor Quality of Geometric and Address-Weighted Centroids}
+\label{tab:weighted-regressor-quality}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllllll}
+Spatial variable & Geography & Property type & Geometric mean error & Weighted mean error & Geometric RMSE / SD(exact) & Weighted RMSE / SD(exact) & RMSE improvement (\%) \\
+CBD distance & SA1 & House & -0.0067 & -0.0057 & 0.0060 & 0.0052 & 14.1 \\
+CBD distance & SA1 & Apartment & 0.0085 & 0.0013 & 0.0129 & 0.0108 & 16.5 \\
+CBD distance & SA2 & House & 0.1239 & -0.0692 & 0.0391 & 0.0351 & 10.2 \\
+CBD distance & SA2 & Apartment & 0.0292 & 0.0121 & 0.0595 & 0.0751 & -26.3 \\
+CBD distance & Postcode & House & 0.8755 & 0.0196 & 0.0648 & 0.0424 & 34.6 \\
+CBD distance & Postcode & Apartment & 0.3982 & -0.0068 & 0.2155 & 0.0830 & 61.5 \\
+Shops within 1 km & SA1 & House & -0.6324 & 0.0856 & 0.4421 & 0.4051 & 8.4 \\
+Shops within 1 km & SA1 & Apartment & -0.1107 & 1.7306 & 0.3548 & 0.2887 & 18.6 \\
+Shops within 1 km & SA2 & House & 2.4574 & 13.5930 & 1.0865 & 1.1014 & -1.4 \\
+Shops within 1 km & SA2 & Apartment & -17.4467 & 15.9720 & 0.9652 & 0.7681 & 20.4 \\
+Shops within 1 km & Postcode & House & -0.4260 & 14.5755 & 1.1392 & 1.1384 & 0.1 \\
+Shops within 1 km & Postcode & Apartment & -30.7458 & 33.2204 & 1.2124 & 0.8657 & 28.6 \\
+\end{tabular}
+}
+\par\smallskip{\footnotesize\raggedright\textit{Notes}: Mean errors use raw units; RMSE measures use the regression transformation. Positive improvement means that the address-weighted proxy has lower RMSE than the geometric centroid proxy.\par}
+\end{table}

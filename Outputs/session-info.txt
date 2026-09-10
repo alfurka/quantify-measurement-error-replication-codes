@@ -1,0 +1,8 @@
+R version 4.6.1 (2026-06-24)
+data.table: 1.18.4
+dplyr: 1.2.1
+sf: 1.1.1
+fixest: 0.14.2
+modelsummary: 2.6.0
+ggplot2: 4.0.3
+sandwich: 3.1.2

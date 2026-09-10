@@ -1,0 +1,1128 @@
+---
+title: "Data Preperation"
+output: html_document
+date: "2025-06-30"
+---
+
+# Summary
+
+## Transactions
+
+Reads the NSW Valuer-General sales file dated 2025-06-30.
+
+-   **Address normalisation** – concatenates unit/house number, street name, locality and postcode into a single lowercase string; trims extra spaces and standardises street-type suffixes with `type_map`.
+-   Produces a clean `transactions` table ready for matching to the national address file.
+
+## GNAF
+
+Imports the August 2024 NSW edition of G-NAF (`ADDRESS_DETAIL`, `STREET_LOCALITY`, `LOCALITY`).
+
+-   Reconstructs a textual address in exactly the same format used for transactions, then attaches the unique `ADDRESS_DETAIL_PID`.
+-   Cleans long street types to their short forms so the two datasets align perfectly.
+
+## Merge GNAF and Transactions
+
+Tests the join—≈ 95 % of sales match a G-NAF PID. Keeps only matched rows and restricts to contracts from 2022-01-01 onward with `Primary purpose == "Residence"`. Saves an intermediate CSV for backup.
+
+## GEO Codes
+
+Pulls longitude and latitude for every PID from `NSW_ADDRESS_DEFAULT_GEOCODE` and converts the transactions into an `sf` POINT layer (`transactions_sf`) in EPSG 7844. A random 10 000-point plot acts as a visual QA step.
+
+## Statistical Areas, Postcodes and Amenities
+
+-   Reads SA1, SA2 and POA polygons and pre-computes their centroids.
+-   Loads point layers for hospitals, parks and rail stops.
+-   Defines the Sydney CBD as the union of two SA2 polygons and extracts its centroid for distance work.
+
+## Shops (from G-NAF)
+
+Filters the G-NAF detail table for records where `FLAT_TYPE_CODE == "SHOP"`, joins their default geocodes and converts the result to an `sf` POINT layer called `shops`.
+
+## Calculate Geographic Variables
+
+Defines `add_geo_vars()`, a reusable helper that:
+
+1.  Re-projects, validates and converts polygons to centroids.
+2.  Computes straight-line distances from each centroid (or point) to the CBD, nearest hospital, park and rail stop.
+3.  Counts G-NAF-coded shops within 1 km, 2 km and 5 km buffers.
+
+The helper is applied once to SA1, SA2 and POA layers, then to the much larger `transactions_sf` in ten equal-sized chunks to avoid memory spikes; the chunk results are row-bound into a single enriched transactions layer.
+
+## Merge All
+
+Uses `add_area_vars_optimized()` to attach the new accessibility and amenity variables from SA1 (`…_sa1`), SA2 (`…_sa2`) and POA (`…_poa`) back onto each transaction point. The join is a two-step process—lean spatial lookup for the area code followed by a fast attribute merge—so only the necessary columns are added.
+
+## Save File
+
+Writes the prepared transaction GeoPackage under `Data/Intermediate`, then
+adds the 2026 regional attributes and writes the final analysis GeoPackage
+under `Data/Analysis`.
+
+## Additional Attributes (2026)
+
+Updates in year 2026. Create additional attributes for each geographical unit (SA1, SA2 and POA) to include:
+
+1.  `sydney` = indicator variable if within greater Sydney boundary (ABS ASGS Ed. 3)
+
+2.  `shr_resid,shr_dwell` = share (%) of area that is zoned residential (R) or any zoning layer that permits dwellings (per NSW Zoning & Planning Layers)
+
+3.  `var_circ` = measure of circularity, where 0 = perfectly circular. Obtained by:
+
+    1.  Fitting a circle using least-squares to the centroid of geog. unit: $\min_{r} \sum_{i=1}^{n} \left( \sqrt{(x_i - x_0)^2 + (y_i - y_0)^2} - r \right)^2(x_0​,y_0​,r)$ where $(x_0, y_0)$ is the center of the circle, $(x_i,y_i)$ is the $i$th boundary point of a geog. unit, and $r$ is the radius.
+
+    2.  Calculating the area that falls outside of the circle plus where the circle does not overlap w/ geog. unit (numerator)
+
+    3.  Evaluating as a share of the total area of the geog. unit (denominator)
+
+4.  Calculate the Hopkins-Skellam statistic $A_k$ for each set of transactions per geog. unit $k$, setting the geog. unit as the window boundary. Monte-Carlo with 999 simulations. Statistic is calculated for each below:
+
+    $A_k=\frac{\sum^m_{i=1}d_i^2}{\sum^m_{j=1}e_j^2}$
+
+    where $m$ is the number of sampled points (999 in this case), $d_i$ are nearest-neighbour distances, and $e_j=d(u_j)$ empty-space distances for equal number of $m$ randomly sampled spatial locations.
+
+# Packages
+
+Run the notebook from the `Code` directory. All input and output paths below
+point to the project-level `Data` directory through `../Data`.
+
+```{r}
+library(dplyr)
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(sf)
+library(purrr)
+library(progressr)
+```
+
+# Transactions
+
+```{r}
+
+transactions = fread('../Data/Inputs/nsw-property-sales-data-updated20250630.csv')
+# ../Data/Inputs/GNAF/NSW_ADDRESS_DETAIL_psv.psv
+# Merge string of `Property unit number`, `Property house number`, `Property street name`, `Property locality`, `Property postcode` into a single address string
+
+transactions = transactions %>%
+  mutate(
+    address = ifelse(
+      (is.na(`Property unit number`) | (`Property unit number` == '')),
+      paste(
+        str_replace(`Property house number`, ' ', ''),
+        `Property street name`,
+        `Property locality`,
+        `Property post code`,
+        sep = ','
+      ),
+      paste(
+        str_replace(`Property unit number`, ' ', ''),
+        str_replace(`Property house number`, ' ', ''),
+        `Property street name`,
+        `Property locality`,
+        `Property post code`,
+        sep = ','
+      )
+    ),
+    address = tolower(address)  # Convert address to lowercase
+  ) %>%
+  filter(!str_starts(address, ','))
+type_map <- c(
+  "street,"    = "st,",
+  "road,"      = "rd,",
+  "avenue,"    = "ave,",
+  "drive,"     = "dr,",
+  "boulevard," = "bvd,",
+  "place,"     = "pl,",
+  "close,"     = "cl,",
+  "crescent,"  = "cres,",
+  "court,"     = "ct,",
+  "circuit,"   = "cct,",
+  "parade,"    = "pde,",
+  "highway,"   = "hwy,",
+  "lane,"      = "ln,",
+  "terrace,"   = "tce,",
+  "parkway,"   = "pkwy,"
+)
+
+# Replace street types in the address
+for (type in names(type_map)) {
+  transactions$address <- str_replace_all(transactions$address, fixed(type), type_map[type])
+}
+
+head(transactions$address, 50)
+```
+
+# GNAF
+
+```{r}
+
+# 1.  load the three NSW tables ---------------------------------------------
+detail  <- fread("../Data/Inputs/GNAF/NSW_ADDRESS_DETAIL_psv.psv",  sep = "|")
+street  <- fread("../Data/Inputs/GNAF/NSW_STREET_LOCALITY_psv.psv", sep = "|")
+local   <- fread("../Data/Inputs/GNAF/NSW_LOCALITY_psv.psv",        sep = "|")
+
+# ── look-ups ──────────────────────────────────────────────────
+street_key <- street %>% 
+  transmute(
+    STREET_LOCALITY_PID,
+    street_name = str_squish(str_to_lower(STREET_NAME)),
+    street_type = str_squish(str_to_lower(STREET_TYPE_CODE))   # rd, st, ave …
+  )
+
+local_key <- local %>% 
+  transmute(
+    LOCALITY_PID,
+    locality = str_squish(str_to_lower(LOCALITY_NAME))
+  )
+
+# ── build address exactly like transactions ──────────────────
+gnaf_with_addr <- detail %>% 
+  left_join(street_key, by = "STREET_LOCALITY_PID") %>% 
+  left_join(local_key,  by = "LOCALITY_PID") %>% 
+  mutate(
+    flat_num  = str_remove_all(FLAT_NUMBER,      "\\s+"),
+    house_num = paste0(
+                  str_remove_all(NUMBER_FIRST,   "\\s+"),
+                  tolower(coalesce(str_remove_all(NUMBER_FIRST_SUFFIX, "\\s+"), ""))
+                ),
+    street    = str_trim(paste(street_name, street_type)),
+
+    address = case_when(
+      !is.na(flat_num) & flat_num != "" ~
+        paste(flat_num, house_num, street, locality, POSTCODE, sep = ","),
+      TRUE ~ paste(house_num, street, locality, POSTCODE, sep = ",")
+    ) |> str_squish() |> str_to_lower()
+  ) %>% 
+  filter(!str_starts(address, ",")) %>% 
+  select(ADDRESS_DETAIL_PID, address)
+
+# Replace long with short names
+
+gnaf_with_addr$address <- str_replace_all(
+  gnaf_with_addr$address,
+  type_map          # just hand the named vector straight in
+)
+
+# sanity-check
+head(gnaf_with_addr$address, 20)
+
+
+rm()
+```
+
+# Merge GNAF and Transactions
+
+Let's see the percentage of transactions we can map into the GNAF:
+
+```{r}
+mean(transactions$address %in% gnaf_with_addr$address, na.rm = TRUE) * 100
+```
+
+Almost 95%. This is sufficiently good for the time being. So, I will drop the rest of the observations from our sample. It can be further improved later
+
+```{r}
+transactions = merge(transactions, gnaf_with_addr, by = 'address', all.x = F, all.y = F)
+#let's clean up the moemory!
+rm(gnaf_with_addr, street, local, detail, street_key, local_key)
+gc()
+```
+
+I will also drop observations before 2022. This leaves us with \# observations:
+
+```{r}
+transactions = transactions %>%
+  filter(as.Date(`Contract date`) >= '2022-01-01') %>%
+  filter(`Primary purpose` == 'Residence')
+nrow(transactions)
+```
+
+Let's save this just in case
+
+```{r}
+fwrite(transactions, '../Data/Intermediate/transactions_with_GNAF-ID_2022_2025.csv')
+# fread('../Data/Intermediate/transactions_with_GNAF-ID_2022_2025.csv')
+```
+
+# GEO Codes
+
+```{R}
+# 1. Load the NSW default-geocode table (this is where G-NAF stores the coords)
+geo <- fread(
+  "../Data/Inputs/GNAF/NSW_ADDRESS_DEFAULT_GEOCODE_psv.psv",
+  sep    = "|",
+  select = c("ADDRESS_DETAIL_PID", "LONGITUDE", "LATITUDE")
+)
+
+# 2. Attach longitude & latitude to the transactions
+transactions <- transactions %>% 
+  left_join(geo, by = "ADDRESS_DETAIL_PID") 
+
+# 3. (Optional) convert to an sf object for spatial work
+transactions_sf <- st_as_sf(
+  transactions,
+  coords = c("LONGITUDE", "LATITUDE"),
+  crs    = 7844
+)
+
+rm(geo)
+gc()
+
+```
+
+Visualize some random 10000 trsnactions
+
+```{r}
+ggplot() +
+  geom_sf(data = transactions_sf[sample(nrow(transactions_sf), 10000), ], 
+          aes(), size = 0.5, alpha = 0.5) +
+  labs(title = "Random Sample of NSW Property Transactions",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() 
+```
+
+# Statistical areas, postcodes and amenities
+
+Let's get amenities
+
+```{r}
+all_sa1<- st_read('../Data/Inputs/Boundaries/sa1_all.gpkg') %>% filter(str_starts(SA1_CODE21, '1'))
+st_crs(all_sa1) <- 7844
+all_sa1 <- all_sa1 %>% mutate(centroid = st_centroid(geom)) #st_union()
+  
+all_sa2 <- st_read('../Data/Inputs/Boundaries/sa2_all.gpkg') %>% filter(str_starts(SA2_CODE21, '1'))
+st_crs(all_sa2) <- 7844
+all_sa2 <- all_sa2 %>% mutate(centroid = st_centroid(geom))
+
+all_poa <- st_read('../Data/Inputs/Boundaries/poa_all.gpkg') %>% filter(str_starts(POA_CODE21, '2'))
+st_crs(all_poa) <- 7844
+all_poa <- all_poa %>% mutate(centroid = st_centroid(geom))
+```
+
+```{r}
+nsw_hosp <- st_read('../Data/Inputs/Amenities/nsw_hospital.gpkg')
+st_crs(nsw_hosp) <- 7844
+nsw_park <- st_read('../Data/Inputs/Amenities/nsw_park.gpkg')
+st_crs(nsw_park) <- 7844
+nsw_rail<- st_read('../Data/Inputs/Amenities/nsw_railstop.gpkg')
+st_crs(nsw_rail) <- 7844
+
+nsw_cbd <- all_sa2 %>% 
+  filter(str_detect(SA2_NAME21,
+                    regex("Sydney",
+                          ignore_case = TRUE))) %>%
+  filter(SA2_CODE21 == 117031644 | SA2_CODE21 == 117031645)
+# merge polygons: 
+nsw_cbd <- st_union(nsw_cbd)
+# find cetroid
+nsw_cbd_centroid <- st_centroid(nsw_cbd)
+```
+
+Get the shops and their coordinates from gNAF
+
+```{r}
+# 1.  Reload the NSW detail table with minimal columns
+shop_cols <- c(
+  "ADDRESS_DETAIL_PID",
+  "FLAT_TYPE_CODE",
+  "FLAT_NUMBER",           # optional: can help with QA
+  "NUMBER_FIRST", "NUMBER_FIRST_SUFFIX",
+  "STREET_LOCALITY_PID",   # optional: join to street table later if desired
+  "LOCALITY_PID",          # "
+  "POSTCODE"
+)
+
+detail_shop <- fread(
+  "../Data/Inputs/GNAF/NSW_ADDRESS_DETAIL_psv.psv",
+  sep    = "|",
+  select = shop_cols
+) %>% 
+  filter(toupper(FLAT_TYPE_CODE) == "SHOP")    # keep only shops
+
+# 2.  Pull the default geocode for every address
+geo_shop <- fread(
+  "../Data/Inputs/GNAF/NSW_ADDRESS_DEFAULT_GEOCODE_psv.psv",
+  sep    = "|",
+  select = c("ADDRESS_DETAIL_PID", "LONGITUDE", "LATITUDE")
+)
+
+# 3.  Merge → one row per shop with coordinates
+shops <- detail_shop %>% 
+  left_join(geo_shop, by = "ADDRESS_DETAIL_PID") 
+
+rm(geo_shop)
+# 4.  How many shops in NSW (G-NAF August 2024)?
+nrow(shops)
+```
+
+Convert to shapefile
+
+```{r}
+shops  <- st_as_sf(shops, coords = c("LONGITUDE", "LATITUDE"), crs = 7844)
+```
+
+# GNAF Centroids
+
+```{r}
+# --------------------------------------------------------------------------
+# GNAF Centroids  ·  residential stock only, split by dwelling type
+# --------------------------------------------------------------------------
+
+handlers("txtprogressbar")
+
+# ── 1 · Load coordinates ----------------------------------------------------
+gnaf_geo <- fread(
+  "../Data/Inputs/GNAF/NSW_ADDRESS_DEFAULT_GEOCODE_psv.psv",
+  sep    = "|",
+  select = c("ADDRESS_DETAIL_PID", "LONGITUDE", "LATITUDE")
+)
+
+# ── 2 · Bring in flags & filter to residential stock -----------------------
+detail_flags <- fread(
+  "../Data/Inputs/GNAF/NSW_ADDRESS_DETAIL_psv.psv",
+  sep    = "|",
+  select = c("ADDRESS_DETAIL_PID", "FLAT_TYPE_CODE", "ALIAS_PRINCIPAL")
+)
+
+# commercial / service FLAT_TYPE_CODEs to exclude completely
+commercial_codes <- c(
+  "SHOP","OFFC","FCTY","WHSE","SHED","GRGE","CARS","KSK",
+  "STOR","SEC","SITE","MBTH","WARD","STLL"
+)
+
+# dwelling-type buckets
+house_codes <- c("", "HSE","TNHS","VLLA","DUPL","CTGE","BTSD","REAR")
+apt_codes   <- c("UNIT","APT","FLAT","BLCK","PTHS","ROOM","STU","LOFT","MSNT","SE")
+
+gnaf_geo <- gnaf_geo %>% 
+  left_join(detail_flags, by = "ADDRESS_DETAIL_PID") %>% 
+  filter(
+    ALIAS_PRINCIPAL == "P",                                     # primary addr
+    !(FLAT_TYPE_CODE %in% commercial_codes)                     # drop commercial
+  ) %>% 
+  mutate(
+    FLAT_TYPE_CODE = tidyr::replace_na(FLAT_TYPE_CODE, ""),     # blank → ""
+    dwelling_type  = case_when(
+      FLAT_TYPE_CODE %in% house_codes ~ "house",
+      FLAT_TYPE_CODE %in% apt_codes   ~ "apartment",
+      TRUE                            ~ NA_character_
+    )
+  ) %>% 
+  filter(!is.na(dwelling_type)) %>%                             # keep two buckets
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 7844)
+
+# Show how many address records share coordinates. Address records, rather
+# than unique coordinate locations, are the weights used below.
+gnaf_coords <- st_coordinates(gnaf_geo)
+centroid_check <- gnaf_geo %>%
+  st_drop_geometry() %>%
+  mutate(X = gnaf_coords[, "X"], Y = gnaf_coords[, "Y"]) %>%
+  group_by(dwelling_type) %>%
+  summarise(
+    address_records = n(),
+    unique_coordinates = n_distinct(X, Y),
+    .groups = "drop"
+  )
+print(centroid_check)
+
+rm(detail_flags, gnaf_coords, centroid_check); gc()
+
+# ── 3 · Attach SA1 / SA2 / POA codes ---------------------------------------
+gnaf_geo <- gnaf_geo %>% 
+  st_join(all_sa1 %>% select(SA1_CODE21, SA2_CODE21), join = st_within) %>% 
+  st_join(all_poa %>% select(POA_CODE21), join = st_within)
+
+# ── 4 · Helper: centroid per area & dwelling bucket ------------------------
+make_centroids <- function(sf_pts, area_col, dw_type) {
+  sf_pts %>% 
+    filter(dwelling_type == dw_type, !is.na(.data[[area_col]])) %>% 
+    group_by(across(all_of(area_col))) %>% 
+    summarise(
+      geometry = st_centroid(st_combine(geometry)),
+      .groups  = "drop"
+    )
+}
+
+# ── 5 · Build & save the six layers ----------------------------------------
+progressr::with_progress({
+  p <- progressr::progressor(6)
+  
+  p("SA1 house");      gnaf_sa1_house <- make_centroids(gnaf_geo, "SA1_CODE21", "house")
+  p("SA1 apartment");  gnaf_sa1_apt   <- make_centroids(gnaf_geo, "SA1_CODE21", "apartment")
+  
+  p("SA2 house");      gnaf_sa2_house <- make_centroids(gnaf_geo, "SA2_CODE21", "house")
+  p("SA2 apartment");  gnaf_sa2_apt   <- make_centroids(gnaf_geo, "SA2_CODE21", "apartment")
+  
+  p("POA house");      gnaf_poa_house <- make_centroids(gnaf_geo, "POA_CODE21", "house")
+  p("POA apartment");  gnaf_poa_apt   <- make_centroids(gnaf_geo, "POA_CODE21", "apartment")
+})
+
+st_write(gnaf_sa1_house, "../Data/Intermediate/gnaf_sa1_house_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+st_write(gnaf_sa1_apt,   "../Data/Intermediate/gnaf_sa1_apartment_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+
+st_write(gnaf_sa2_house, "../Data/Intermediate/gnaf_sa2_house_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+st_write(gnaf_sa2_apt,   "../Data/Intermediate/gnaf_sa2_apartment_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+
+st_write(gnaf_poa_house, "../Data/Intermediate/gnaf_poa_house_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+st_write(gnaf_poa_apt,   "../Data/Intermediate/gnaf_poa_apartment_centroid.gpkg",
+         delete_dsn = TRUE, quiet = TRUE)
+
+```
+
+# Calculate geographic variables
+
+These must be calculated for each SA1, SA2, POA centroid.
+
+-   distance to cbd
+-   distance to nearest hospital
+-   distance to nearest park
+-   distance to nearest rail stop
+-   the number shops within 1, 2 and 5 km distances.
+
+```{R}
+add_geo_vars <- function(
+    area_sf,
+    shops_sf       = shops,
+    cbd_centroid   = nsw_cbd_centroid,
+    hosp_sf        = nsw_hosp,
+    park_sf        = nsw_park,
+    rail_sf        = nsw_rail
+) {
+
+  # -------- Utilities (unchanged) -------------------------------------------
+  crs_target <- 7844
+  to_target  <- function(x) st_transform(x, crs = crs_target)
+
+  prep_layer <- function(x) {
+    x <- to_target(x)
+    if (!all(st_is_valid(x))) x <- st_make_valid(x)
+    st_centroid(x)
+  }
+
+  nearest_dist <- function(from_pts, to_pts) {
+    nearest_idx <- st_nearest_feature(from_pts, to_pts)
+    st_distance(from_pts, to_pts[nearest_idx, ], by_element = TRUE)
+  }
+
+  shop_count <- function(from_pts, shops_pts, r) {
+    within_dist_list <- st_is_within_distance(from_pts, shops_pts, dist = r)
+    lengths(within_dist_list)
+  }
+
+  # -------- Prepare Inputs (unchanged) --------------------------------------
+  if ("centroid" %in% names(area_sf) && inherits(area_sf$centroid, "sfc")) {
+    message("Using pre-existing 'centroid' column for calculations.")
+    area_centroids <- to_target(area_sf$centroid)
+  } else {
+    message("No valid 'centroid' column found. Calculating centroids from main geometry.")
+    area_centroids <- st_centroid(to_target(area_sf))
+  }
+
+  shops_sf     <- prep_layer(shops_sf)
+  hosp_sf      <- prep_layer(hosp_sf)
+  park_sf      <- prep_layer(park_sf)
+  rail_sf      <- prep_layer(rail_sf)
+  cbd_centroid <- prep_layer(cbd_centroid)
+
+  # -------- Heavy work with progress bar (unchanged) ------------------------
+  vars_list <- progressr::with_progress({
+    p <- progressr::progressor(steps = 7)
+    p(message = "Calculating CBD distance");       dist_cbd <- as.numeric(st_distance(area_centroids, cbd_centroid))
+    p(message = "Calculating distance to Hospitals"); dist_hosp <- nearest_dist(area_centroids, hosp_sf)
+    p(message = "Calculating distance to Parks");     dist_park <- nearest_dist(area_centroids, park_sf)
+    p(message = "Calculating distance to Rail stops");  dist_rail <- nearest_dist(area_centroids, rail_sf)
+    p(message = "Counting shops within 1 km");     shops_1km <- shop_count(area_centroids, shops_sf, 1000)
+    p(message = "Counting shops within 2 km");     shops_2km <- shop_count(area_centroids, shops_sf, 2000)
+    p(message = "Counting shops within 5 km");     shops_5km <- shop_count(area_centroids, shops_sf, 5000)
+
+    list(
+      dist_cbd_km  = dist_cbd / 1000,
+      dist_hosp_km = as.numeric(dist_hosp) / 1000,
+      dist_park_km = as.numeric(dist_park) / 1000,
+      dist_rail_km = as.numeric(dist_rail) / 1000,
+      shops_1km    = shops_1km,
+      shops_2km    = shops_2km,
+      shops_5km    = shops_5km
+    )
+  })
+
+  out_sf <- area_sf %>%
+    mutate(!!!vars_list)
+
+  return(out_sf)
+}
+
+
+all_sa1 <- add_geo_vars(all_sa1)
+all_sa2 <- add_geo_vars(all_sa2)
+all_poa <- add_geo_vars(all_poa)
+gnaf_sa1_house = add_geo_vars(gnaf_sa1_house)
+gnaf_sa1_apt = add_geo_vars(gnaf_sa1_apt)
+gnaf_sa2_house = add_geo_vars(gnaf_sa2_house)
+gnaf_sa2_apt = add_geo_vars(gnaf_sa2_apt)
+gnaf_poa_house = add_geo_vars(gnaf_poa_house)
+gnaf_poa_apt = add_geo_vars(gnaf_poa_apt)
+
+transactions_sf$centroid  = transactions_sf$geometry
+# 1  Split row indices into 10 roughly equal chunks ------------------
+n_chunks <- 10
+row_index <- split(
+  seq_len(nrow(transactions_sf)),
+  cut(seq_len(nrow(transactions_sf)),
+      breaks = n_chunks, labels = FALSE)
+)
+
+# -------------------------------------------------------------------
+# 2  Loop over chunks, run add_geo_vars(), collect results -----------
+transactions_geo_list <- vector("list", n_chunks)
+
+for (i in seq_along(row_index)) {
+  rows <- row_index[[i]]
+  transactions_geo_list[[i]] <- add_geo_vars(transactions_sf[rows, ])
+}
+
+# -------------------------------------------------------------------
+# 3  Row-bind all chunk results --------------------------------------
+transactions_sf <- dplyr::bind_rows(transactions_geo_list)
+```
+
+# Merge all
+
+I will merge `transactions` with created variables from `sa1_geo`, `sa2_geo`, and `poa_geo`. They will have `varname_suffix` such as `dist_cbd_km_sa1`.
+
+```{R}
+# --------------------------------------------------------------------------
+# Merge all geographic levels onto the transaction data (Final Version)
+# --------------------------------------------------------------------------
+# This version uses the superior function-based approach you designed,
+# with one minor refinement to make the helper function fully self-contained.
+
+handlers("txtprogressbar") # A clean progress bar handler
+
+# The variables we want to attach from the area layers
+var_interest <- c(
+  "dist_cbd_km", "dist_hosp_km", "dist_park_km", "dist_rail_km",
+  "shops_1km", "shops_2km", "shops_5km"
+)
+
+#' Spatially joins area-level variables to a transaction sf object.
+#'
+#' @param trans_sf The sf object with transaction points.
+#' @param area_sf The sf object with area polygons (e.g., SA1, SA2).
+#' @param vars_keep A character vector of columns to keep from `area_sf`.
+#' @param suffix A string to append to the new column names.
+#' @param code_col The name of the ID column in `area_sf` (e.g., "SA1_CODE21").
+#' @return The `trans_sf` object with new columns added.
+add_area_vars <- function(trans_sf, area_sf, vars_keep, suffix, code_col) {
+  
+  # Prepare the area data for joining:
+  # 1. Drop the polygon geometry to prevent it from being added to the points.
+  # 2. Select only the necessary columns.
+  # 3. Add the specified suffix to the variable names.
+  area_to_join <- area_sf %>%
+    st_drop_geometry() %>%
+    select(any_of(c(code_col, vars_keep))) %>%
+    rename_with(~ ifelse(.x == code_col, .x, paste0(.x, suffix)))
+
+  # Perform the spatial join. `st_join` will use the geometry from `area_sf`
+  # (the original object, before we dropped its geometry in the pipe)
+  # to find the matches for `trans_sf`.
+  st_join(trans_sf, area_sf %>% select(all_of(code_col))) %>%
+    # Now, left-join the prepared attributes using the area code.
+    # This is faster and cleaner than joining all attributes spatially.
+    left_join(area_to_join, by = code_col)
+}
+
+# A slightly improved version of the helper function that is more efficient
+add_area_vars_optimized <- function(trans_sf, area_sf, vars_keep, suffix, code_col) {
+  
+  # Prepare the area data for joining by dropping geometry and renaming
+  area_attributes <- area_sf %>%
+    st_drop_geometry() %>%
+    select(any_of(c(code_col, vars_keep))) %>%
+    rename_with(~ ifelse(.x == code_col, .x, paste0(.x, suffix)))
+
+  # Step 1: Perform a lean spatial join to only get the ID of the containing polygon
+  trans_with_id <- st_join(trans_sf, area_sf %>% select(all_of(code_col)), left = TRUE)
+  
+  # Step 2: Perform a fast, non-spatial attribute join using the ID
+  left_join(trans_with_id, area_attributes, by = code_col)
+}
+
+
+# --- Execution using the optimized function ---
+transactions_final_sf <- progressr::with_progress({
+  p <- progressr::progressor(steps = 3)
+
+  # --- SA1: Join all relevant variables ---
+  p(message = "Joining SA1 variables...")
+  sa1_keep <- setdiff(names(all_sa1), c("geometry", "centroid"))
+  transactions_sf <- add_area_vars_optimized(
+    transactions_sf, all_sa1, sa1_keep, "_sa1", "SA1_CODE21"
+  )
+
+  # --- SA2: Join only the variables of interest ---
+  p(message = "Joining SA2 variables...")
+  transactions_sf <- add_area_vars_optimized(
+    transactions_sf, all_sa2, var_interest, "_sa2", "SA2_CODE21"
+  )
+
+  # --- POA: Join the postcode and variables of interest ---
+  p(message = "Joining POA variables...")
+  transactions_sf <- add_area_vars_optimized(
+    transactions_sf, all_poa, var_interest, "_poa", "POA_CODE21"
+  )
+  
+  # Return the final object
+  transactions_sf
+})
+
+# --- Final Check ---
+# The final object is clean, with no extra geometry columns to remove.
+glimpse(transactions_final_sf)
+
+```
+
+Now given that `transactions_final_sf` has SA1, SA2 and POA identifiers, we can easily merge them with gnaf-based calculated amenity variables. So, merge `transactions_final_sf` with `gnaf_sa1_apt` and others above. using the identifiers...
+
+```{r}
+# --------------------------------------------------------------------------
+# Merge G-NAF-based amenity variables (house / apartment) onto transactions
+# --------------------------------------------------------------------------
+
+handlers("txtprogressbar")
+
+geo_vars <- c("dist_cbd_km","dist_hosp_km","dist_park_km",
+              "dist_rail_km","shops_1km","shops_2km","shops_5km")
+
+# helper → drop geometry & add suffix to the seven variables ---------------
+suffix_vars <- function(sf, suffix, code_col) {
+  sf %>% 
+    st_drop_geometry() %>% 
+    rename_with(~ ifelse(.x %in% geo_vars, paste0(.x, suffix), .x),
+                all_of(geo_vars)) %>% 
+    select(any_of(c(code_col, paste0(geo_vars, suffix))))
+}
+
+# build six lean lookup tables ---------------------------------------------
+sa1_house_attr <- suffix_vars(gnaf_sa1_house, "_sa1_house", "SA1_CODE21")
+sa1_apt_attr   <- suffix_vars(gnaf_sa1_apt,   "_sa1_apt",   "SA1_CODE21")
+
+sa2_house_attr <- suffix_vars(gnaf_sa2_house, "_sa2_house", "SA2_CODE21")
+sa2_apt_attr   <- suffix_vars(gnaf_sa2_apt,   "_sa2_apt",   "SA2_CODE21")
+
+poa_house_attr <- suffix_vars(gnaf_poa_house, "_poa_house", "POA_CODE21")
+poa_apt_attr   <- suffix_vars(gnaf_poa_apt,   "_poa_apt",   "POA_CODE21")
+
+# join everything onto transactions_final_sf -------------------------------
+transactions_final_sf <- progressr::with_progress({
+  p <- progressr::progressor(6)
+  transactions_final_sf %>% 
+    {p("SA1-house"); left_join(., sa1_house_attr, by = "SA1_CODE21")} %>% 
+    {p("SA1-apt");   left_join(., sa1_apt_attr,   by = "SA1_CODE21")} %>% 
+    {p("SA2-house"); left_join(., sa2_house_attr, by = "SA2_CODE21")} %>% 
+    {p("SA2-apt");   left_join(., sa2_apt_attr,   by = "SA2_CODE21")} %>% 
+    {p("POA-house"); left_join(., poa_house_attr, by = "POA_CODE21")} %>% 
+    {p("POA-apt");   left_join(., poa_apt_attr,   by = "POA_CODE21")}
+})
+
+# quick sanity-check
+glimpse(transactions_final_sf, width = 80)
+```
+
+# Get SEIFA
+
+```{r}
+seifa = readxl::read_xlsx('../Data/Inputs/seifa.xlsx')
+mean(transactions_final_sf$SA1_CODE21 %in% seifa$SA1)
+```
+
+merge them:
+
+```{r}
+transactions_final_sf = merge(transactions_final_sf, 
+      seifa, 
+      by.x = 'SA1_CODE21',
+      by.y = 'SA1', 
+      all.x = T, 
+      all.y = F)
+```
+
+Save the file
+
+```{r}
+transactions_final_sf %>% select(-centroid) %>%
+  st_write('../Data/Intermediate/transactions_with_GNAF_and_amenities_2022_2025_revision.gpkg', 
+           delete_dsn = TRUE, quiet = TRUE)
+```
+
+# Additional Attributes (2026)
+
+This section creates the regional variables used by
+`Regressions_v10.Rmd`. It calculates only the variables needed in the
+analysis, reuses the completed Hopkins--Skellam results, and retains the
+transaction point geometry in the final GeoPackage.
+
+## Setup
+
+```{r}
+library(dplyr)
+library(sf)
+library(purrr)
+library(future)
+library(future.apply)
+library(progressr)
+
+# Use at most eight workers and leave one logical core free.
+n_workers <- min(8, max(1, parallel::detectCores() - 1))
+chunk_size <- 100
+
+handlers("txtprogressbar")
+sf_use_s2(FALSE)
+
+capital_path <- "../Data/Inputs/Boundaries/GCCSA_2021_AUST_GDA2020.shp"
+zoning_path <- "../Data/Inputs/Zoning/EPI_Land_Zoning.shp"
+hs_path <- "../Data/Inputs/hopskell_all_mc.rds"
+transaction_path <- paste0(
+  "../Data/Intermediate/",
+  "transactions_with_GNAF_and_amenities_2022_2025_revision.gpkg"
+)
+
+geographies <- list(
+  SA1 = list(
+    path = "../Data/Inputs/Boundaries/sa1_all.gpkg",
+    code = "SA1_CODE21",
+    prefix = "1"
+  ),
+  SA2 = list(
+    path = "../Data/Inputs/Boundaries/sa2_all.gpkg",
+    code = "SA2_CODE21",
+    prefix = "1"
+  ),
+  POA = list(
+    path = "../Data/Inputs/Boundaries/poa_all.gpkg",
+    code = "POA_CODE21",
+    prefix = "2"
+  )
+)
+```
+
+## Shared spatial layers
+
+```{r}
+# Greater Sydney boundary
+capital_syd <- st_read(capital_path, quiet = TRUE) %>%
+  filter(GCC_CODE21 == "1GSYD") %>%
+  st_transform(7856) %>%
+  st_make_valid()
+
+# R1--R5 are the residential zones used to calculate residential coverage.
+# st_make_valid() is applied after projection because projection can introduce
+# a small number of invalid geometries even when the source layer is valid.
+residential_zones <- st_read(zoning_path, quiet = TRUE) %>%
+  filter(SYM_CODE %in% paste0("R", 1:5)) %>%
+  select(geometry) %>%
+  st_transform(7856) %>%
+  st_make_valid()
+```
+
+## Functions used for all three geographies
+
+```{r}
+# Read one geography, keep the relevant state/postcode observations, and
+# retain only its identifier and geometry.
+load_geography <- function(path, code_col, prefix) {
+  geography <- st_read(path, quiet = TRUE)
+  keep <- startsWith(as.character(geography[[code_col]]), prefix)
+  geography <- geography[keep, code_col]
+
+  geography %>%
+    st_transform(7856) %>%
+    st_make_valid()
+}
+
+# Residential area within every boundary. This replaces the old row-by-row
+# st_difference() calculation. Direct intersection correctly returns zero
+# residential area when no residential zoning overlaps a boundary.
+residential_coverage <- function(geography, code_col, residential_zones) {
+  boundaries <- st_sf(
+    code = as.character(geography[[code_col]]),
+    geometry = st_geometry(geography)
+  )
+
+  residential <- st_sf(geometry = st_geometry(residential_zones))
+
+  pieces <- suppressWarnings(st_intersection(boundaries, residential))
+
+  if (nrow(pieces) == 0) {
+    return(rep(0, nrow(geography)))
+  }
+
+  coverage <- pieces %>%
+    group_by(code) %>%
+    summarise(.groups = "drop") %>%
+    mutate(residential_area = as.numeric(st_area(geometry))) %>%
+    st_drop_geometry()
+
+  tibble(code = as.character(geography[[code_col]])) %>%
+    left_join(coverage, by = "code") %>%
+    mutate(residential_area = coalesce(residential_area, 0)) %>%
+    pull(residential_area)
+}
+
+# Circularity for one polygon. The fitted circle uses the polygon centroid and
+# the root-mean-square distance from that centroid to the boundary vertices.
+# The numerator is the symmetric-difference area:
+# area(polygon) + area(circle) - 2 * area(polygon intersect circle).
+circularity_one <- function(geometry) {
+  tryCatch({
+    polygon_area <- as.numeric(sf::st_area(geometry))
+    coordinates <- sf::st_coordinates(geometry)[, c("X", "Y"), drop = FALSE]
+    centre <- suppressWarnings(sf::st_centroid(geometry))
+    centre_xy <- sf::st_coordinates(centre)[1, c("X", "Y")]
+
+    radius <- sqrt(mean(
+      (coordinates[, "X"] - centre_xy[["X"]])^2 +
+        (coordinates[, "Y"] - centre_xy[["Y"]])^2
+    ))
+
+    circle <- sf::st_buffer(centre, dist = radius)
+    overlap <- suppressWarnings(sf::st_intersection(geometry, circle))
+    overlap_area <- if (length(overlap) == 0 || all(sf::st_is_empty(overlap))) {
+      0
+    } else {
+      sum(as.numeric(sf::st_area(overlap)), na.rm = TRUE)
+    }
+
+    circle_area <- as.numeric(sf::st_area(circle))
+    symmetric_difference <- polygon_area + circle_area - 2 * overlap_area
+
+    max(symmetric_difference, 0) / polygon_area
+  }, error = function(e) NA_real_)
+}
+
+# Each worker receives only a small geometry chunk and returns a numeric vector.
+# This avoids copying the zoning and transaction data to every worker.
+circularity_chunk <- function(geometry_chunk) {
+  vapply(
+    seq_along(geometry_chunk),
+    function(i) circularity_one(geometry_chunk[i]),
+    numeric(1)
+  )
+}
+
+parallel_circularity <- function(geometry, chunk_size) {
+  row_groups <- split(
+    seq_along(geometry),
+    ceiling(seq_along(geometry) / chunk_size)
+  )
+  geometry_chunks <- lapply(row_groups, function(rows) geometry[rows])
+
+  with_progress({
+    progress <- progressor(steps = length(geometry_chunks))
+
+    values <- future_lapply(
+      geometry_chunks,
+      function(one_chunk) {
+        answer <- circularity_chunk(one_chunk)
+        progress()
+        answer
+      },
+      future.scheduling = Inf,
+      future.seed = TRUE
+    )
+  }, enable = TRUE)
+
+  unlist(values, use.names = FALSE)
+}
+
+process_geography <- function(details, label, residential_zones, capital_syd) {
+  geography <- load_geography(
+    details$path,
+    details$code,
+    details$prefix
+  )
+
+  message("\n", label, ": ", nrow(geography), " boundaries")
+
+  message(label, " — 1/3: area and Greater Sydney indicator")
+  area_sa <- as.numeric(st_area(geography))
+  sydney <- lengths(st_intersects(geography, capital_syd)) > 0
+
+  message(label, " — 2/3: residential coverage")
+  area_resid <- residential_coverage(
+    geography,
+    details$code,
+    residential_zones
+  )
+  shr_resid <- ifelse(area_sa > 0, area_resid / area_sa, NA_real_)
+  shr_resid <- pmin(pmax(shr_resid, 0), 1)
+
+  message(
+    label, " — 3/3: circularity on ", n_workers,
+    " workers (progress is by ", chunk_size, "-boundary chunk)"
+  )
+  var_circ <- parallel_circularity(
+    st_geometry(geography),
+    chunk_size
+  )
+
+  tibble(
+    !!details$code := as.character(geography[[details$code]]),
+    sydney = sydney,
+    area_sa = area_sa,
+    var_circ = var_circ,
+    shr_resid = shr_resid
+  )
+}
+```
+
+## Calculate SA1, SA2 and POA attributes
+
+The zoning overlay is vectorised. Circularity is the only calculation run in
+parallel because it requires a separate fitted circle for each boundary.
+
+```{r}
+plan(multisession, workers = n_workers)
+
+regional_attributes <- imap(
+  geographies,
+  ~ process_geography(
+    details = .x,
+    label = .y,
+    residential_zones = residential_zones,
+    capital_syd = capital_syd
+  )
+)
+
+plan(sequential)
+```
+
+## Add the completed Hopkins--Skellam results
+
+The Hopkins--Skellam simulations are not rerun here. The completed results in
+`hopskell_all_mc.rds` are joined to the newly calculated regional attributes.
+
+```{r}
+hs <- readRDS(hs_path) %>%
+  transmute(
+    zone_type,
+    zone_code = as.character(zone_code),
+    HS_stat_A = as.numeric(H),
+    HS_test_pval = as.numeric(p_value)
+  )
+
+add_hs <- function(attributes, label, code_col) {
+  hs_level <- hs %>%
+    filter(zone_type == label) %>%
+    select(-zone_type)
+
+  left_join(
+    attributes,
+    hs_level,
+    by = setNames("zone_code", code_col)
+  )
+}
+
+sa1 <- add_hs(regional_attributes$SA1, "SA1", "SA1_CODE21")
+sa2 <- add_hs(regional_attributes$SA2, "SA2", "SA2_CODE21")
+poa <- add_hs(regional_attributes$POA, "POA", "POA_CODE21")
+
+saveRDS(sa1, "../Data/Intermediate/sa1_nsw.rds")
+saveRDS(sa2, "../Data/Intermediate/sa2_nsw.rds")
+saveRDS(poa, "../Data/Intermediate/poa_nsw.rds")
+```
+
+## Add the regional attributes to the transaction data
+
+The point geometry is retained so that `Regressions_v10.Rmd` can generate the
+transaction map from the same analysis file.
+
+```{r}
+transactions <- st_read(transaction_path, quiet = TRUE) %>%
+  filter(STE_CODE21_sa1 == "1")
+
+regional_for_join <- function(attributes, code_col, prefix) {
+  attributes %>%
+    select(
+      all_of(code_col),
+      sydney, area_sa, var_circ, shr_resid,
+      HS_stat_A, HS_test_pval
+    ) %>%
+    rename_with(
+      ~ paste0(prefix, "_", .x),
+      -all_of(code_col)
+    )
+}
+
+transactions_updated <- transactions %>%
+  left_join(
+    regional_for_join(sa1, "SA1_CODE21", "sa1"),
+    by = "SA1_CODE21"
+  ) %>%
+  left_join(
+    regional_for_join(sa2, "SA2_CODE21", "sa2"),
+    by = "SA2_CODE21"
+  ) %>%
+  left_join(
+    regional_for_join(poa, "POA_CODE21", "poa"),
+    by = "POA_CODE21"
+  )
+
+output_path <- paste0(
+  "../Data/Analysis/",
+  "transactions_with_GNAF_and_amenities_2022_2025_nsw_updated_20260726.gpkg"
+)
+
+st_write(
+  transactions_updated,
+  output_path,
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+```
+
+## Simple checks
+
+```{r}
+required_regional_columns <- unlist(lapply(
+  c("sa1", "sa2", "poa"),
+  function(level) {
+    paste0(
+      level, "_",
+      c("sydney", "area_sa", "var_circ", "shr_resid", "HS_stat_A")
+    )
+  }
+))
+
+cat("Input transaction rows: ", nrow(transactions), "\n")
+cat("Output transaction rows:", nrow(transactions_updated), "\n")
+cat(
+  "Missing required columns:",
+  paste(setdiff(required_regional_columns, names(transactions_updated)),
+        collapse = ", "),
+  "\n"
+)
+cat(
+  "Geometry retained:",
+  inherits(transactions_updated, "sf"),
+  "—", paste(unique(as.character(st_geometry_type(transactions_updated))),
+             collapse = ", "),
+  "\n"
+)
+
+transactions_updated %>%
+  st_drop_geometry() %>%
+  summarise(
+    sa1_share_min = min(sa1_shr_resid, na.rm = TRUE),
+    sa1_share_max = max(sa1_shr_resid, na.rm = TRUE),
+    sa2_share_min = min(sa2_shr_resid, na.rm = TRUE),
+    sa2_share_max = max(sa2_shr_resid, na.rm = TRUE),
+    poa_share_min = min(poa_shr_resid, na.rm = TRUE),
+    poa_share_max = max(poa_shr_resid, na.rm = TRUE)
+  )
+```

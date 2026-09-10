@@ -1,0 +1,29 @@
+\begin{table}[!htbp]
+\centering
+\caption{Complete Coefficient-Gap Accounting: CBD Distance}
+\label{tab:fwl-cbd}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllllll}
+Geography & Property type & Fixed effects & Coefficient gap & Partial error--outcome covariance & Variance rescaling & Conditional exact/proxy variance & N \\
+SA1 & House & No FE & -0.0000 & -0.0000 & -0.0000 & 1.0000 & 281,194 \\
+SA1 & House & SA3 & -0.0010 & -0.0013 & 0.0003 & 0.9987 & 281,194 \\
+SA1 & House & SA4 & 0.0000 & -0.0002 & 0.0002 & 0.9993 & 281,194 \\
+SA1 & Apartment & No FE & -0.0000 & -0.0003 & 0.0003 & 0.9986 & 58,217 \\
+SA1 & Apartment & SA3 & 0.0017 & -0.0042 & 0.0059 & 0.9700 & 58,216 \\
+SA1 & Apartment & SA4 & 0.0015 & -0.0016 & 0.0031 & 0.9885 & 58,216 \\
+SA2 & House & No FE & -0.0005 & -0.0001 & -0.0004 & 1.0014 & 281,194 \\
+SA2 & House & SA3 & -0.0063 & -0.0009 & -0.0054 & 1.0282 & 281,194 \\
+SA2 & House & SA4 & -0.0007 & -0.0053 & 0.0046 & 0.9859 & 281,194 \\
+SA2 & Apartment & No FE & -0.0001 & -0.0018 & 0.0016 & 0.9916 & 58,217 \\
+SA2 & Apartment & SA3 & -0.0204 & -0.0299 & 0.0096 & 0.9515 & 58,216 \\
+SA2 & Apartment & SA4 & -0.0019 & -0.0181 & 0.0163 & 0.9403 & 58,216 \\
+Postcode & House & No FE & -0.0011 & -0.0011 & -0.0000 & 1.0002 & 281,076 \\
+Postcode & House & SA3 & 0.0082 & -0.0382 & 0.0464 & 0.7570 & 281,076 \\
+Postcode & House & SA4 & 0.0188 & -0.0212 & 0.0400 & 0.8779 & 281,076 \\
+Postcode & Apartment & No FE & 0.0143 & -0.0130 & 0.0273 & 0.8586 & 58,204 \\
+Postcode & Apartment & SA3 & 0.0851 & -0.0588 & 0.1438 & 0.2715 & 58,203 \\
+Postcode & Apartment & SA4 & 0.1091 & -0.0509 & 0.1600 & 0.4128 & 58,203 \\
+\end{tabular}
+}
+\par\smallskip{\footnotesize\raggedright\textit{Notes}: The underlying unrounded partial error--outcome covariance and variance-rescaling components sum exactly to the reported coefficient gap after partialling out the controls and fixed effects. The identity is descriptive and is not a causal decomposition.\par}
+\end{table}

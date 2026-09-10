@@ -1,0 +1,1972 @@
+---
+title: "Regression and publication outputs — v10"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+editor_options:
+  chunk_output_type: inline
+---
+
+# Purpose
+
+This notebook runs the complete analysis and creates the publication-ready
+tables and figures in `Outputs`. The code uses one set of
+plain labels throughout:
+
+\[
+S_i=\text{exact-coordinate spatial variable}, \qquad
+\widetilde S_i^g=\text{centroid proxy}, \qquad
+e_i^g=\widetilde S_i^g-S_i.
+\]
+
+The regression comparison is
+
+\[
+\Delta^g=widehat\beta_{\text{centroid},g}
+-\widehat\beta_{\text{exact}}.
+\]
+
+Thus, \(\Delta=0\) means that centroid substitution does not change the
+coefficient. Raw coefficient gaps remain the inferential object. Relative
+coefficient changes are also reported for the two primary variables:
+
+\[
+P^g=100\left(
+\frac{\widehat\beta_{\text{centroid},g}}
+{\widehat\beta_{\text{exact}}}-1
+\right).
+\]
+
+```{r setup}
+#| message: false
+#| warning: false
+
+packages_used <- c(
+  "data.table", "dplyr", "sf", "fixest", "modelsummary",
+  "ggplot2", "sandwich"
+)
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(sf)
+  library(fixest)
+  library(modelsummary)
+  library(ggplot2)
+})
+
+options(
+  modelsummary_format_numeric_latex = "plain",
+  scipen = 999
+)
+
+REGRESSION_DIR <- if (file.exists("Regressions_v10.Rmd")) {
+  normalizePath(".")
+} else {
+  normalizePath("Code")
+}
+PROJECT_ROOT <- normalizePath(file.path(REGRESSION_DIR, ".."))
+DATA_FILE <- file.path(
+  PROJECT_ROOT, "Data", "Analysis",
+  "transactions_with_GNAF_and_amenities_2022_2025_nsw_updated_20260726.gpkg"
+)
+
+BOOTSTRAP_REPS <- 999L
+BOOTSTRAP_SEED <- 20260714L
+
+OUTPUT_DIR <- file.path(PROJECT_ROOT, "Outputs")
+TABLE_DIR <- file.path(OUTPUT_DIR, "tables")
+FIGURE_DIR <- file.path(OUTPUT_DIR, "figures")
+DATA_DIR <- file.path(OUTPUT_DIR, "data")
+
+for (path in c(OUTPUT_DIR, TABLE_DIR, FIGURE_DIR, DATA_DIR)) {
+  dir.create(path, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Start each run with a clean set of generated tables, figures, and CSV files.
+for (path in c(TABLE_DIR, FIGURE_DIR, DATA_DIR)) {
+  unlink(list.files(path, full.names = TRUE))
+}
+```
+
+# Configuration
+
+```{r specification-dictionaries}
+outcomes <- data.table(
+  outcome_key = c("cbd", "shops1", "shops2", "shops5", "hospital", "park", "rail"),
+  outcome = c(
+    "CBD distance", "Shops within 1 km", "Shops within 2 km",
+    "Shops within 5 km", "Hospital distance", "Park distance",
+    "Rail distance"
+  ),
+  stem = c(
+    "dist_cbd_km", "shops_1km", "shops_2km", "shops_5km",
+    "dist_hosp_km", "dist_park_km", "dist_rail_km"
+  ),
+  family = c("primary", "primary", "primary", "primary",
+             "additional", "additional", "additional"),
+  outcome_order = seq_len(7L)
+)
+
+geographies <- data.table(
+  geo_key = c("sa1", "sa2", "poa"),
+  geography = c("SA1", "SA2", "Postcode"),
+  suffix = c("sa1", "sa2", "poa"),
+  cluster_var = c("SA1_CODE21", "SA2_CODE21", "POA_CODE21"),
+  id_var = c("SA1_CODE21", "SA2_CODE21", "POA_CODE21"),
+  attribute_prefix = c("sa1", "sa2", "poa"),
+  geo_order = seq_len(3L)
+)
+
+property_types <- data.table(
+  property_key = c("house", "apartment"),
+  property_type = c("House", "Apartment"),
+  house_value = c(TRUE, FALSE),
+  property_order = seq_len(2L)
+)
+
+fixed_effects <- data.table(
+  fe_key = c("none", "sa3", "sa4"),
+  fixed_effects = c("No FE", "SA3", "SA4"),
+  fe_rhs = c("", "SA3_CODE21_sa1 + timeFE", "SA4_CODE21_sa1 + timeFE"),
+  fe_order = seq_len(3L)
+)
+
+sample_definitions <- data.table(
+  sample_key = c(
+    "full", "sydney", "high_clustering", "high_irregularity",
+    "low_residential", "large_area"
+  ),
+  sample = c(
+    "Full sample", "Greater Sydney", "High clustering",
+    "Most irregular", "Low residential share", "Largest area"
+  ),
+  sample_order = seq_len(6L)
+)
+
+cross_join <- function(x, y) {
+  data.table::as.data.table(merge(
+    as.data.frame(x), as.data.frame(y), by = NULL
+  ))
+}
+
+controls_for <- function(stem) {
+  common <- c("splines::ns(Area, df = 3)", "splines::ns(ier, df = 3)")
+  extras <- switch(
+    stem,
+    dist_cbd_km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(shops_1km + 1)"
+    ),
+    shops_1km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)"
+    ),
+    shops_2km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)"
+    ),
+    shops_5km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)"
+    ),
+    dist_hosp_km = c(
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)",
+      "log(shops_1km + 1)"
+    ),
+    dist_park_km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_rail_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)",
+      "log(shops_1km + 1)"
+    ),
+    dist_rail_km = c(
+      "log(dist_hosp_km * 1000 + 1)",
+      "log(dist_park_km * 1000 + 1)",
+      "log(dist_cbd_km * 1000 + 1)",
+      "log(shops_1km + 1)"
+    )
+  )
+  c(common, extras)
+}
+
+transform_spatial <- function(x, stem) {
+  if (startsWith(stem, "dist_")) log(x * 1000 + 1) else log(x + 1)
+}
+```
+
+# Spatial-variable constructions
+
+For amenity type \(k\), exact and centroid-based nearest distances are
+
+\[
+D_{ik}=\min_j d(p_i,a_{jk}), \qquad
+\widetilde D_{ik}^g=\min_j d(c_{g(i)},a_{jk}),
+\]
+
+where \(p_i\) is the exact property coordinate, \(c_{g(i)}\) is the centroid
+of its released geography, and \(a_{jk}\) is an amenity location.
+
+For shops inside radius \(r\),
+
+\[
+C_i(r)=\sum_j \mathbf 1\{d(p_i,a_j)\le r\}, \qquad
+\widetilde C_i^g(r)=
+\sum_j \mathbf 1\{d(c_{g(i)},a_j)\le r\}.
+\]
+
+The one-, two-, and five-kilometre comparisons show whether centroid
+sensitivity changes as the constructed variable operates over a larger
+spatial scale.
+
+# Load and clean data once
+
+```{r load-and-clean-data}
+
+base_columns <- c(
+  "SA1_CODE21", "SA2_CODE21", "POA_CODE21", "SA3_CODE21_sa1",
+  "SA4_CODE21_sa1", "Property.unit.number", "Purchase.price", "Area",
+  "Contract.date", "Settlement.date", "irsd", "irsad", "ier",
+  paste0(rep(c("sa1", "sa2", "poa"), each = 5L), "_",
+         rep(c("sydney", "area_sa", "var_circ", "shr_resid", "HS_stat_A"), 3L))
+)
+
+identifier_columns <- c(
+  "address", "Dealing.number", "Download.date...time",
+  "ADDRESS_DETAIL_PID", "Property.ID", "Sale.counter"
+)
+
+all_stems <- c(
+  "dist_cbd_km", "dist_hosp_km", "dist_park_km", "dist_rail_km",
+  "shops_1km", "shops_2km", "shops_5km"
+)
+spatial_columns <- unique(c(
+  all_stems,
+  unlist(lapply(all_stems, function(stem) paste0(stem, "_", c("sa1", "sa2", "poa")))),
+  unlist(lapply(all_stems, function(stem) {
+    paste0(stem, "_", rep(c("sa1", "sa2", "poa"), each = 2L),
+           "_", rep(c("house", "apt"), 3L))
+  }))
+))
+
+layer_name <- sf::st_layers(DATA_FILE)$name[[1L]]
+quote_identifier <- function(x) paste0('"', gsub('"', '""', x, fixed = TRUE), '"')
+
+requested_columns <- unique(c(identifier_columns, base_columns, spatial_columns))
+
+select_sql <- paste(quote_identifier(requested_columns), collapse = ", ")
+analysis_query <- sprintf(
+  "SELECT %s FROM %s",
+  select_sql,
+  quote_identifier(layer_name)
+)
+
+transactions_raw <- sf::st_read(DATA_FILE, query = analysis_query, quiet = TRUE)
+if (inherits(transactions_raw, "sf")) {
+  transactions_raw <- sf::st_drop_geometry(transactions_raw)
+}
+transactions <- data.table::as.data.table(transactions_raw)
+rm(transactions_raw)
+
+input_rows <- nrow(transactions)
+transactions[, sale_id := paste(Dealing.number, address, sep = "|")]
+input_sale_ids <- uniqueN(transactions$sale_id)
+
+eligible_input_rows <- transactions[
+  Purchase.price >= 200000 & Purchase.price < 5000000 &
+    Area < 10000 & !is.na(Purchase.price) & !is.na(Area),
+  .N
+]
+
+# Keep the most recently downloaded version of each dealing-address sale.
+# All rows from that download are retained here so that non-unique G-NAF
+# matches can be identified rather than resolved arbitrarily.
+transactions[, latest_download := max(Download.date...time), by = sale_id]
+transactions <- transactions[Download.date...time == latest_download]
+
+transactions <- transactions[
+  Purchase.price >= 200000 & Purchase.price < 5000000 &
+    Area < 10000 & !is.na(Purchase.price) & !is.na(Area)
+]
+
+eligible_latest_rows <- nrow(transactions)
+eligible_sale_ids <- uniqueN(transactions$sale_id)
+
+# Rows that differ only in source identifiers have identical inputs for every
+# analysis in this notebook and can be collapsed safely. If a sale retains
+# more than one distinct set of model inputs, its exact-coordinate benchmark
+# is ambiguous and the sale is excluded from the primary validation sample.
+analysis_columns <- unique(c(base_columns, spatial_columns))
+transactions_distinct <- unique(
+  transactions,
+  by = c("sale_id", analysis_columns)
+)
+
+candidate_counts <- transactions_distinct[, .(candidate_rows = .N), by = sale_id]
+ambiguous_sale_ids <- candidate_counts[candidate_rows > 1L, sale_id]
+
+ambiguous_candidates <- transactions_distinct[sale_id %chin% ambiguous_sale_ids]
+ambiguous_match_summary <- ambiguous_candidates[, {
+  exact_counts <- vapply(.SD, uniqueN, integer(1L))
+  list(
+    property_type = ifelse(Property.unit.number[[1L]] == "", "House", "Apartment"),
+    conflict_type = ifelse(
+      any(exact_counts > 1L),
+      "Conflicting exact spatial variables",
+      "Other conflicting model inputs"
+    ),
+    conflicting_spatial_variables = paste(
+      names(exact_counts)[exact_counts > 1L],
+      collapse = ", "
+    ),
+    candidate_rows = .N
+  )
+}, by = sale_id, .SDcols = all_stems]
+
+clean_sale_ids <- candidate_counts[candidate_rows == 1L, sale_id]
+transactions <- transactions_distinct[sale_id %chin% clean_sale_ids]
+
+transactions[, `:=`(
+  ier = suppressWarnings(as.numeric(ier)),
+  irsd = suppressWarnings(as.numeric(irsd)),
+  irsad = suppressWarnings(as.numeric(irsad)),
+  house = Property.unit.number == "",
+  log_price = log(Purchase.price),
+  timeFE = format(as.IDate(Contract.date), "%Y-%m")
+)]
+
+transactions[, property_type := fifelse(house, "House", "Apartment")]
+setkey(transactions, house)
+
+sample_counts <- transactions[, .N, by = property_type][order(property_type)]
+ambiguous_counts <- ambiguous_match_summary[, .N, by = .(property_type, conflict_type)]
+
+eligible_property_counts <- unique(
+  transactions_distinct[, .(
+    sale_id,
+    property_type = fifelse(Property.unit.number == "", "House", "Apartment")
+  )],
+  by = "sale_id"
+)[, .(eligible_sales = .N), by = property_type]
+
+ambiguity_by_property <- merge(
+  eligible_property_counts,
+  ambiguous_match_summary[, .(excluded_sales = .N), by = property_type],
+  by = "property_type",
+  all = TRUE
+)
+ambiguity_by_property <- merge(
+  ambiguity_by_property,
+  sample_counts[, .(property_type, final_sales = N)],
+  by = "property_type",
+  all = TRUE
+)
+ambiguity_by_property[, excluded_percent := 100 * excluded_sales / eligible_sales]
+
+sample_cleaning_flow <- data.table(
+  stage = c(
+    "Rows in matched analysis file",
+    "Distinct dealing-address sale identifiers",
+    "Rows satisfying the original price and area restrictions",
+    "Latest eligible dealing-address sales",
+    "Excluded sales with conflicting model inputs",
+    "Final unambiguous validation sample",
+    "Final houses",
+    "Final apartments"
+  ),
+  unit = c("Rows", "Sales", "Rows", "Sales", "Sales", "Sales", "Sales", "Sales"),
+  count = c(
+    input_rows,
+    input_sale_ids,
+    eligible_input_rows,
+    eligible_sale_ids,
+    length(ambiguous_sale_ids),
+    nrow(transactions),
+    transactions[house == TRUE, .N],
+    transactions[house == FALSE, .N]
+  )
+)
+
+sample_counts
+sample_cleaning_flow
+ambiguous_counts
+ambiguity_by_property
+```
+
+# Descriptive statistics
+
+```{r descriptive-statistics}
+descriptive_dictionary <- data.table(
+  variable = c(
+    "Purchase.price", "Area", "irsad", "ier", "dist_cbd_km",
+    "dist_hosp_km", "dist_park_km", "dist_rail_km", "shops_1km"
+  ),
+  label = c(
+    "Price (AUD)", "Area (sqm)", "IRSAD", "IER", "CBD distance (km)",
+    "Hospital distance (km)", "Park distance (km)",
+    "Rail distance (km)", "Shops within 1 km"
+  ),
+  source = c(
+    "NSW Valuer General", "NSW Valuer General", "ABS", "ABS",
+    "G-NAF", "OpenStreetMap", "OpenStreetMap", "OpenStreetMap", "G-NAF"
+  )
+)
+
+descriptive_long <- rbindlist(lapply(seq_len(nrow(descriptive_dictionary)), function(i) {
+  var <- descriptive_dictionary$variable[[i]]
+  transactions[, .(
+    mean = as.numeric(mean(get(var), na.rm = TRUE)),
+    median = as.numeric(median(get(var), na.rm = TRUE)),
+    sd = as.numeric(sd(get(var), na.rm = TRUE)),
+    N = sum(!is.na(get(var)))
+  ), by = property_type][, `:=`(
+    variable = var,
+    label = descriptive_dictionary$label[[i]],
+    source = descriptive_dictionary$source[[i]]
+  )]
+}), fill = TRUE)
+
+descriptive_table <- dcast(
+  descriptive_long,
+  label + source ~ property_type,
+  value.var = c("mean", "median", "sd", "N")
+)
+descriptive_table[, display_order := match(label, descriptive_dictionary$label)]
+setorder(descriptive_table, display_order)
+```
+
+# Geography-based sample definitions
+
+```{r sample-membership}
+build_sample_ids <- function(data, geo_row) {
+  id_var <- geo_row$id_var
+  prefix <- geo_row$attribute_prefix
+  attributes <- c(
+    paste0(prefix, "_sydney"),
+    paste0(prefix, "_area_sa"),
+    paste0(prefix, "_var_circ"),
+    paste0(prefix, "_shr_resid"),
+    paste0(prefix, "_HS_stat_A")
+  )
+  unit_data <- unique(data[, c(id_var, attributes), with = FALSE], by = id_var)
+
+  q25_hs <- quantile(unit_data[[paste0(prefix, "_HS_stat_A")]], 0.25, na.rm = TRUE)
+  q75_irregular <- quantile(unit_data[[paste0(prefix, "_var_circ")]], 0.75, na.rm = TRUE)
+  q25_residential <- quantile(unit_data[[paste0(prefix, "_shr_resid")]], 0.25, na.rm = TRUE)
+  q75_area <- quantile(unit_data[[paste0(prefix, "_area_sa")]], 0.75, na.rm = TRUE)
+
+  list(
+    full = unit_data[[id_var]],
+    sydney = unit_data[get(paste0(prefix, "_sydney")) == TRUE][[id_var]],
+    high_clustering = unit_data[
+      get(paste0(prefix, "_HS_stat_A")) <= q25_hs
+    ][[id_var]],
+    high_irregularity = unit_data[
+      get(paste0(prefix, "_var_circ")) >= q75_irregular
+    ][[id_var]],
+    low_residential = unit_data[
+      get(paste0(prefix, "_shr_resid")) <= q25_residential
+    ][[id_var]],
+    large_area = unit_data[
+      get(paste0(prefix, "_area_sa")) >= q75_area
+    ][[id_var]]
+  )
+}
+
+sample_ids <- setNames(vector("list", nrow(geographies)), geographies$geo_key)
+for (i in seq_len(nrow(geographies))) {
+  sample_ids[[geographies$geo_key[[i]]]] <- build_sample_ids(
+    transactions, geographies[i]
+  )
+}
+```
+
+# Generic paired-model engine
+
+The exact and centroid regressions use the same observations, controls, and
+fixed effects. Their coefficients are therefore paired rather than
+independent. For bootstrap draw \(b\), the same cluster multiplier
+\(\xi_g^{(b)}\in\{-1,1\}\) is applied to both coefficient influence
+contributions:
+
+\[
+\widehat\beta_{exact}^{*(b)}
+=\widehat\beta_{exact}
++\sum_g\xi_g^{(b)}\widehat\psi_{exact,g},
+\]
+
+\[
+\widehat\beta_{centroid}^{*(b)}
+=\widehat\beta_{centroid}
++\sum_g\xi_g^{(b)}\widehat\psi_{centroid,g}.
+\]
+
+The paired bootstrap draw is
+
+\[
+\widehat\Delta^{*(b)}
+=\widehat\beta_{centroid}^{*(b)}
+-\widehat\beta_{exact}^{*(b)}.
+\]
+
+Using the same multiplier preserves covariance between the two estimates.
+The bootstrap clusters at the geography supplying the centroid because the
+proxy error is shared within that geography. This is an influence-function
+multiplier bootstrap; models are not re-estimated 999 times. The resulting
+intervals allow arbitrary dependence within the released-geography cluster
+and assume independence across those clusters after conditioning on the
+controls and fixed effects. They are therefore one-way geography-clustered
+intervals, not multiway-cluster counterparts to the coefficient-specific
+standard errors reported for the fixed-effect models.
+
+```{r paired-model-functions}
+make_formula <- function(outcome_name, controls, fe_rhs = "") {
+  rhs <- paste(c(outcome_name, controls), collapse = " + ")
+  if (nzchar(fe_rhs)) {
+    as.formula(paste("log_price ~", rhs, "|", fe_rhs))
+  } else {
+    as.formula(paste("log_price ~", rhs))
+  }
+}
+
+vcov_for <- function(fe_rhs) {
+  if (!nzchar(fe_rhs)) "iid" else as.formula(paste0("~", fe_rhs))
+}
+
+prepare_pair_data <- function(spec, sample_key = "full", corrected = FALSE) {
+  stem <- spec$stem
+  proxy_var <- paste0(stem, "_", spec$suffix)
+  corrected_var <- paste0(
+    proxy_var, "_", if (spec$property_key == "house") "house" else "apt"
+  )
+
+  data <- transactions[house == spec$house_value]
+  if (sample_key != "full") {
+    ids <- sample_ids[[spec$geo_key]][[sample_key]]
+    data <- data[get(spec$id_var) %chin% ids]
+  }
+
+  keep <- unique(c(
+    "log_price", "Area", "ier", "timeFE", "SA3_CODE21_sa1",
+    "SA4_CODE21_sa1", spec$cluster_var, stem, proxy_var,
+    if (corrected) corrected_var else character(),
+    "dist_cbd_km", "dist_hosp_km", "dist_park_km", "dist_rail_km",
+    "shops_1km"
+  ))
+  data <- copy(data[, ..keep])
+  data[, `.exact` := transform_spatial(get(stem), stem)]
+  data[, `.proxy` := transform_spatial(get(proxy_var), stem)]
+  if (corrected) {
+    data[, `.weighted` := transform_spatial(get(corrected_var), stem)]
+  }
+
+  controls <- controls_for(stem)
+  formulas <- list(
+    exact = make_formula(".exact", controls, spec$fe_rhs),
+    proxy = make_formula(".proxy", controls, spec$fe_rhs)
+  )
+  if (corrected) {
+    formulas$weighted <- make_formula(".weighted", controls, spec$fe_rhs)
+  }
+
+  needed <- unique(c(
+    unlist(lapply(formulas, all.vars)), spec$cluster_var,
+    stem, proxy_var, if (corrected) corrected_var else character()
+  ))
+  data <- data[complete.cases(data[, ..needed])]
+  if (nrow(data) < 30L) stop("Fewer than 30 common complete observations")
+
+  list(
+    data = data,
+    formulas = formulas,
+    vcov = vcov_for(spec$fe_rhs),
+    stem = stem,
+    proxy_var = proxy_var,
+    corrected_var = corrected_var
+  )
+}
+
+coefficient_row <- function(model, term) {
+  # Some small two-way-cluster subsamples require fixest's standard positive-
+  # semidefinite VCOV repair; the repaired estimates remain available here.
+  estimates <- suppressWarnings(
+    modelsummary::get_estimates(model, conf_level = 0.95)
+  )
+  row <- estimates[estimates$term == term, , drop = FALSE]
+  if (nrow(row) != 1L) stop("Focal coefficient not found: ", term)
+  c(
+    estimate = row$estimate[[1L]],
+    std.error = row$std.error[[1L]],
+    p.value = row$p.value[[1L]]
+  )
+}
+
+get_focal_influence <- function(model, coefficient) {
+  score <- sandwich::estfun(model)
+  bread <- sandwich::bread(model)
+  if (is.null(colnames(score))) colnames(score) <- names(coef(model))
+  if (is.null(colnames(bread))) {
+    colnames(bread) <- rownames(bread) <- names(coef(model))
+  }
+  if (!coefficient %in% colnames(score) ||
+      !coefficient %in% colnames(bread)) {
+    stop("Focal term is absent from influence matrices")
+  }
+  drop(score %*% bread[, coefficient, drop = FALSE]) / nobs(model)
+}
+
+paired_multiplier <- function(model_exact, model_proxy, data, cluster_var, B, seed,
+                              keep_draws = FALSE) {
+  influence_exact <- get_focal_influence(model_exact, ".exact")
+  influence_proxy <- get_focal_influence(model_proxy, ".proxy")
+  observations <- fixest::obs(model_exact)
+
+  cluster <- as.character(data[[cluster_var]][observations])
+  cluster_exact <- rowsum(influence_exact, cluster, reorder = FALSE)[, 1L]
+  cluster_proxy <- rowsum(influence_proxy, cluster, reorder = FALSE)[, 1L]
+  cluster_exact <- cluster_exact - mean(cluster_exact)
+  cluster_proxy <- cluster_proxy - mean(cluster_proxy)
+  G <- length(cluster_exact)
+
+  set.seed(seed)
+  perturb_exact <- perturb_proxy <- numeric(B)
+  batch_size <- 100L
+  for (first in seq.int(1L, B, by = batch_size)) {
+    index <- first:min(first + batch_size - 1L, B)
+    weights <- matrix(
+      sample(c(-1, 1), G * length(index), replace = TRUE),
+      nrow = G,
+      ncol = length(index)
+    )
+    finite_sample <- sqrt(G / (G - 1))
+    perturb_exact[index] <- as.vector(
+      crossprod(cluster_exact, weights)
+    ) * finite_sample
+    perturb_proxy[index] <- as.vector(
+      crossprod(cluster_proxy, weights)
+    ) * finite_sample
+  }
+
+  beta_exact <- unname(coef(model_exact)[[".exact"]])
+  beta_proxy <- unname(coef(model_proxy)[[".proxy"]])
+  delta <- beta_proxy - beta_exact
+  draw_exact <- beta_exact + perturb_exact
+  draw_proxy <- beta_proxy + perturb_proxy
+  draw_delta <- draw_proxy - draw_exact
+  perturb_delta <- draw_delta - delta
+
+  summary <- data.table(
+    bootstrap_se = sd(perturb_delta),
+    ci_low = unname(quantile(draw_delta, 0.025)),
+    ci_high = unname(quantile(draw_delta, 0.975)),
+    p_value_delta = (1 + sum(abs(perturb_delta) >= abs(delta))) / (B + 1),
+    clusters = G
+  )
+  draws <- NULL
+  if (keep_draws) {
+    draws <- data.table(
+      draw = seq_len(B),
+      beta_exact = draw_exact,
+      beta_centroid = draw_proxy,
+      delta = draw_delta
+    )
+  }
+  list(summary = summary, draws = draws)
+}
+
+absorption_r2 <- function(data, fe_rhs) {
+  if (!nzchar(fe_rhs)) return(NA_real_)
+  formula <- as.formula(paste(".proxy ~ 1 |", fe_rhs))
+  model <- feols(formula, data = data, vcov = "iid", notes = FALSE, warn = FALSE)
+  as.numeric(fixest::fitstat(model, "r2")$r2)
+}
+
+fit_pair <- function(spec, sample_key = "full", bootstrap = FALSE,
+                     keep_draws = FALSE, seed = BOOTSTRAP_SEED) {
+  prepared <- prepare_pair_data(spec, sample_key = sample_key)
+  data <- prepared$data
+  if (uniqueN(data$.proxy) < 2L) {
+    return(list(
+      summary = data.table(
+        status = "not estimable: no focal variation",
+        N = nrow(data)
+      ),
+      draws = NULL
+    ))
+  }
+
+  model_exact <- feols(
+    prepared$formulas$exact, data = data, vcov = prepared$vcov,
+    notes = FALSE, warn = FALSE
+  )
+  model_proxy <- feols(
+    prepared$formulas$proxy, data = data, vcov = prepared$vcov,
+    notes = FALSE, warn = FALSE
+  )
+  beta_exact <- coefficient_row(model_exact, ".exact")
+  beta_proxy <- coefficient_row(model_proxy, ".proxy")
+
+  result <- data.table(
+    status = "estimated",
+    benchmark = beta_exact[["estimate"]],
+    benchmark_se = beta_exact[["std.error"]],
+    benchmark_p = beta_exact[["p.value"]],
+    centroid = beta_proxy[["estimate"]],
+    centroid_se = beta_proxy[["std.error"]],
+    centroid_p = beta_proxy[["p.value"]],
+    delta = beta_proxy[["estimate"]] - beta_exact[["estimate"]],
+    relative_change_percent =
+      100 * (beta_proxy[["estimate"]] / beta_exact[["estimate"]] - 1),
+    se_difference =
+      beta_proxy[["std.error"]] - beta_exact[["std.error"]],
+    absorption_r2 = absorption_r2(data, spec$fe_rhs),
+    N = nobs(model_exact)
+  )
+
+  draws <- NULL
+  if (bootstrap) {
+    boot <- paired_multiplier(
+      model_exact, model_proxy, data, spec$cluster_var,
+      B = BOOTSTRAP_REPS, seed = seed, keep_draws = keep_draws
+    )
+    result <- cbind(result, boot$summary)
+    draws <- boot$draws
+  }
+  list(summary = result, draws = draws)
+}
+
+spec_metadata <- function(spec, sample_key = "full") {
+  data.table(
+    outcome_key = spec$outcome_key,
+    outcome = spec$outcome,
+    family = spec$family,
+    outcome_order = spec$outcome_order,
+    geo_key = spec$geo_key,
+    geography = spec$geography,
+    geo_order = spec$geo_order,
+    property_key = spec$property_key,
+    property_type = spec$property_type,
+    property_order = spec$property_order,
+    fe_key = spec$fe_key,
+    fixed_effects = spec$fixed_effects,
+    fe_order = spec$fe_order,
+    sample_key = sample_key
+  )
+}
+
+fit_specification <- function(spec, sample_key = "full", bootstrap = FALSE,
+                              keep_draws = FALSE, seed = BOOTSTRAP_SEED) {
+  metadata <- spec_metadata(spec, sample_key)
+  fit <- fit_pair(
+    spec, sample_key = sample_key, bootstrap = bootstrap,
+    keep_draws = keep_draws, seed = seed
+  )
+  list(
+    summary = cbind(metadata, fit$summary),
+    draws = if (is.null(fit$draws)) NULL else cbind(metadata, fit$draws)
+  )
+}
+```
+
+# Full-sample coefficient comparisons and paired inference
+
+```{r full-sample-paired-results}
+full_specs <- cross_join(
+  cross_join(cross_join(outcomes, geographies), property_types),
+  fixed_effects
+)
+setorder(full_specs, outcome_order, geo_order, property_order, fe_order)
+full_specs[, spec_id := .I]
+
+representative_distribution <- function(spec) {
+  (spec$outcome_key == "cbd" & spec$geo_key == "sa1" &
+     spec$property_key == "house" & spec$fe_key == "none") ||
+  (spec$outcome_key == "cbd" & spec$geo_key == "poa" &
+     spec$property_key == "apartment" & spec$fe_key == "sa4") ||
+  (spec$outcome_key == "shops1" & spec$geo_key == "sa1" &
+     spec$property_key == "house" & spec$fe_key == "none") ||
+  (spec$outcome_key == "shops1" & spec$geo_key == "sa2" &
+     spec$property_key == "apartment" & spec$fe_key == "none")
+}
+
+full_runs <- lapply(seq_len(nrow(full_specs)), function(i) {
+  spec <- full_specs[i]
+  fit_specification(
+    spec,
+    bootstrap = TRUE,
+    keep_draws = representative_distribution(spec),
+    seed = BOOTSTRAP_SEED + spec$spec_id
+  )
+})
+
+paired_results <- rbindlist(lapply(full_runs, `[[`, "summary"), fill = TRUE)
+bootstrap_draws <- rbindlist(lapply(full_runs, `[[`, "draws"), fill = TRUE)
+
+if ("p_value_delta" %in% names(paired_results)) {
+  paired_results[, global_fdr_q := p.adjust(p_value_delta, method = "BH")]
+  paired_results[, within_outcome_fdr_q :=
+                   p.adjust(p_value_delta, method = "BH"), by = outcome_key]
+}
+
+# Relative changes make the two primary outcomes easier to compare visually.
+# Inference remains based on the raw coefficient gap Delta.
+paired_results[, relative_ci_a := 100 * ci_low / benchmark]
+paired_results[, relative_ci_b := 100 * ci_high / benchmark]
+paired_results[, relative_ci_low := pmin(relative_ci_a, relative_ci_b)]
+paired_results[, relative_ci_high := pmax(relative_ci_a, relative_ci_b)]
+paired_results[, absorption_percent := 100 * absorption_r2]
+paired_results[, c("relative_ci_a", "relative_ci_b") := NULL]
+
+setorder(
+  paired_results, outcome_order, geo_order, property_order, fe_order
+)
+paired_results[
+  1:min(.N, 12L),
+  .(outcome, geography, property_type, fixed_effects, delta,
+    bootstrap_se, ci_low, ci_high, p_value_delta)
+]
+```
+
+# Measurement-error diagnostics
+
+The diagnostic table describes the spatial regressor before conditioning on
+the hedonic controls. Its scale-free error measure is
+
+\[
+\operatorname{RMSE/SD(exact)}
+=
+\frac{
+\sqrt{N^{-1}\sum_i(\widetilde S_i^g-S_i)^2}
+}{
+\operatorname{SD}(S_i)
+}.
+\]
+
+A value of one means that the proxy error is as large as one standard
+deviation of the exact transformed variable. The variance ratio and
+correlations describe the error structure; they are not separate tests of
+classical or Berkson error.
+
+```{r measurement-error-diagnostics}
+diagnostic_specs <- cross_join(cross_join(outcomes, geographies), property_types)
+setorder(diagnostic_specs, outcome_order, geo_order, property_order)
+
+measurement_diagnostics <- rbindlist(lapply(seq_len(nrow(diagnostic_specs)), function(i) {
+  spec <- diagnostic_specs[i]
+  proxy_var <- paste0(spec$stem, "_", spec$suffix)
+  data <- transactions[house == spec$house_value, c(spec$stem, proxy_var), with = FALSE]
+  data <- data[complete.cases(data)]
+  exact_raw <- data[[spec$stem]]
+  proxy_raw <- data[[proxy_var]]
+  exact <- transform_spatial(exact_raw, spec$stem)
+  proxy <- transform_spatial(proxy_raw, spec$stem)
+  error <- proxy - exact
+
+  cbind(
+    spec_metadata(cbind(spec, fixed_effects[1L]))[, !c("fe_key", "fixed_effects", "fe_order", "sample_key")],
+    data.table(
+      mean_proxy_error_raw = mean(proxy_raw - exact_raw),
+      rmse_sd_exact = sqrt(mean(error^2)) / sd(exact),
+      exact_proxy_variance_ratio = var(exact) / var(proxy),
+      corr_proxy_error = cor(proxy, error),
+      corr_exact_error = cor(exact, error),
+      N = length(exact)
+    )
+  )
+}), fill = TRUE)
+```
+
+# Exact FWL decomposition
+
+The exact and centroid models use the same complete-case observations,
+controls, and fixed effects. After applying this common residualisation
+operator, write the residuals as \(y\), \(s\), and
+\(\widetilde s=s+e\). The Frisch--Waugh--Lovell theorem gives
+
+\[
+\widehat\beta_C
+=
+\frac{\operatorname{Cov}(s+e,y)}
+{\operatorname{Var}(\widetilde s)},
+\qquad
+\widehat\beta_E
+=
+\frac{\operatorname{Cov}(s,y)}
+{\operatorname{Var}(s)}.
+\]
+
+Expanding the first covariance and subtracting the second coefficient gives
+the exact fitted coefficient-gap accounting
+
+\[
+\widehat\Delta
+=
+\frac{\operatorname{Cov}(e,y)}
+{\operatorname{Var}(\widetilde s)}
++
+\operatorname{Cov}(s,y)
+\left[
+\frac{1}{\operatorname{Var}(\widetilde s)}
+-
+\frac{1}{\operatorname{Var}(s)}
+\right].
+\]
+
+The first term is the partial error--outcome covariance component. The second
+is the conditional variance-rescaling component. The identity requires no
+classical- or Berkson-error assumption and accounts for the observed
+coefficient gap rather than causal bias.
+
+```{r fwl-decomposition}
+fwl_one <- function(spec) {
+  prepared <- prepare_pair_data(spec)
+  data <- prepared$data
+  controls <- controls_for(spec$stem)
+  # make_formula expects the first RHS component separately; build the three
+  # auxiliary formulas explicitly to keep the control set identical.
+  rhs <- paste(controls, collapse = " + ")
+  formula_for <- function(lhs) {
+    if (nzchar(spec$fe_rhs)) {
+      as.formula(paste(lhs, "~", rhs, "|", spec$fe_rhs))
+    } else {
+      as.formula(paste(lhs, "~", rhs))
+    }
+  }
+
+  model_y <- feols(formula_for("log_price"), data, vcov = "iid",
+                   notes = FALSE, warn = FALSE)
+  model_exact <- feols(formula_for(".exact"), data, vcov = "iid",
+                       notes = FALSE, warn = FALSE)
+  model_proxy <- feols(formula_for(".proxy"), data, vcov = "iid",
+                       notes = FALSE, warn = FALSE)
+
+  y <- resid(model_y)
+  exact <- resid(model_exact)
+  proxy <- resid(model_proxy)
+  error <- proxy - exact
+  var_exact <- var(exact)
+  var_proxy <- var(proxy)
+  cov_exact_y <- cov(exact, y)
+  cov_error_y <- cov(error, y)
+  beta_exact <- cov_exact_y / var_exact
+  beta_proxy <- cov(proxy, y) / var_proxy
+  covariance_component <- cov_error_y / var_proxy
+  variance_component <-
+    cov_exact_y * (1 / var_proxy - 1 / var_exact)
+  delta <- beta_proxy - beta_exact
+
+  data.table(
+    benchmark = beta_exact,
+    centroid = beta_proxy,
+    delta = delta,
+    covariance_component = covariance_component,
+    variance_component = variance_component,
+    decomposition_sum = covariance_component + variance_component,
+    identity_error = delta - covariance_component - variance_component,
+    conditional_variance_ratio = var_exact / var_proxy,
+    conditional_error_variance = var(error),
+    conditional_cov_exact_error = cov(exact, error),
+    conditional_cov_error_y = cov_error_y,
+    N = length(y)
+  )
+}
+
+fwl_specs <- full_specs[outcome_key %chin% c("cbd", "shops1")]
+fwl_results <- rbindlist(lapply(seq_len(nrow(fwl_specs)), function(i) {
+  spec <- fwl_specs[i]
+  cbind(spec_metadata(spec), fwl_one(spec))
+}), fill = TRUE)
+```
+
+# Address-weighted centroid evaluation
+
+```{r corrected-centroid-results}
+corrected_one <- function(spec) {
+  prepared <- prepare_pair_data(spec, corrected = TRUE)
+  data <- prepared$data
+  model_exact <- feols(
+    prepared$formulas$exact, data, vcov = prepared$vcov,
+    notes = FALSE, warn = FALSE
+  )
+  model_proxy <- feols(
+    prepared$formulas$proxy, data, vcov = prepared$vcov,
+    notes = FALSE, warn = FALSE
+  )
+  model_weighted <- feols(
+    prepared$formulas$weighted, data, vcov = prepared$vcov,
+    notes = FALSE, warn = FALSE
+  )
+  beta_exact <- coefficient_row(model_exact, ".exact")
+  beta_proxy <- coefficient_row(model_proxy, ".proxy")
+  beta_weighted <- coefficient_row(model_weighted, ".weighted")
+
+  exact_raw <- data[[prepared$stem]]
+  proxy_raw <- data[[prepared$proxy_var]]
+  weighted_raw <- data[[prepared$corrected_var]]
+  rmse_proxy <- sqrt(mean((data$.proxy - data$.exact)^2))
+  rmse_weighted <- sqrt(mean((data$.weighted - data$.exact)^2))
+
+  data.table(
+    benchmark = beta_exact[["estimate"]],
+    benchmark_se = beta_exact[["std.error"]],
+    centroid = beta_proxy[["estimate"]],
+    centroid_se = beta_proxy[["std.error"]],
+    corrected = beta_weighted[["estimate"]],
+    corrected_se = beta_weighted[["std.error"]],
+    delta_centroid =
+      beta_proxy[["estimate"]] - beta_exact[["estimate"]],
+    delta_corrected =
+      beta_weighted[["estimate"]] - beta_exact[["estimate"]],
+    mean_error_centroid = mean(proxy_raw - exact_raw),
+    mean_error_corrected = mean(weighted_raw - exact_raw),
+    rmse_sd_exact_centroid = rmse_proxy / sd(data$.exact),
+    rmse_sd_exact_corrected = rmse_weighted / sd(data$.exact),
+    rmse_improvement_percent =
+      100 * (rmse_proxy - rmse_weighted) / rmse_proxy,
+    N = nobs(model_exact)
+  )
+}
+
+corrected_specs <- full_specs[outcome_key %chin% c("cbd", "shops1")]
+corrected_results <- rbindlist(lapply(seq_len(nrow(corrected_specs)), function(i) {
+  spec <- corrected_specs[i]
+  cbind(spec_metadata(spec), corrected_one(spec))
+}), fill = TRUE)
+```
+
+# Greater Sydney and high-risk regional subsamples
+
+```{r subsample-results}
+subsample_results <- data.table()
+subsample_specs <- cross_join(
+  full_specs[outcome_key %chin% c("cbd", "shops1")],
+  sample_definitions[sample_key != "full"]
+)
+setorder(
+  subsample_specs, outcome_order, geo_order, sample_order,
+  property_order, fe_order
+)
+
+subsample_results <- rbindlist(lapply(seq_len(nrow(subsample_specs)), function(i) {
+  spec <- subsample_specs[i]
+  fit <- fit_specification(spec, sample_key = spec$sample_key)
+  fit$summary[, sample := spec$sample]
+  fit$summary[, sample_order := spec$sample_order]
+  fit$summary
+}), fill = TRUE)
+
+full_core_for_samples <- merge(
+  paired_results[outcome_key %chin% c("cbd", "shops1")],
+  sample_definitions[sample_key == "full", .(sample_key, sample, sample_order)],
+  by = "sample_key",
+  all.x = TRUE
+)
+subsample_plot_data <- rbindlist(
+  list(full_core_for_samples, subsample_results), fill = TRUE
+)
+```
+
+# Sydney and non-Sydney descriptive table
+
+```{r regional-descriptives}
+transaction_region_summary <- rbindlist(lapply(
+  c("Purchase.price", "dist_cbd_km", "shops_1km"),
+  function(var) {
+    transactions[, .(
+      mean = as.numeric(mean(get(var), na.rm = TRUE)),
+      median = as.numeric(median(get(var), na.rm = TRUE)),
+      sd = as.numeric(sd(get(var), na.rm = TRUE))
+    ), by = .(region = fifelse(sa1_sydney, "Sydney", "Non-Sydney"))][
+      , variable := var
+    ]
+  }
+))
+
+regional_attribute_summary <- rbindlist(lapply(seq_len(nrow(geographies)), function(i) {
+  geo <- geographies[i]
+  prefix <- geo$attribute_prefix
+  id <- geo$id_var
+  vars <- paste0(prefix, "_", c("area_sa", "shr_resid", "HS_stat_A", "var_circ"))
+  units <- unique(transactions[, c(id, paste0(prefix, "_sydney"), vars), with = FALSE], by = id)
+  rbindlist(lapply(vars, function(var) {
+    units[, value := if (endsWith(var, "area_sa")) get(var) / 10000 else get(var)]
+    units[!is.na(get(paste0(prefix, "_sydney"))), .(
+      mean = as.numeric(mean(value, na.rm = TRUE)),
+      median = as.numeric(median(value, na.rm = TRUE)),
+      sd = as.numeric(sd(value, na.rm = TRUE))
+    ), by = .(region = fifelse(get(paste0(prefix, "_sydney")), "Sydney", "Non-Sydney"))][
+      , `:=`(variable = sub(paste0("^", prefix, "_"), "", var), geography = geo$geography)
+    ]
+  }))
+}), fill = TRUE)
+```
+
+# Compact publication summaries
+
+```{r publication-summaries}
+additional_variable_summary <- paired_results[family == "additional", {
+  largest <- which.max(abs(delta))
+  .(
+    maximum_absolute_gap = abs(delta[largest]),
+    largest_gap_specification =
+      paste(property_type[largest], fixed_effects[largest], sep = ", "),
+    intervals_excluding_zero =
+      sum(ci_low > 0 | ci_high < 0),
+    adjusted_gaps = sum(within_outcome_fdr_q < 0.05),
+    sign_reversals = sum(sign(benchmark) != sign(centroid))
+  )
+}, by = .(outcome_order, outcome, geo_order, geography)]
+setorder(additional_variable_summary, outcome_order, geo_order)
+
+fwl_publication <- copy(fwl_results)
+setorder(
+  fwl_publication, outcome_order, geo_order, property_order, fe_order
+)
+
+weighted_regressor_summary <- corrected_results[
+  fe_key == "none",
+  .(
+    outcome_order, outcome, geo_order, geography,
+    property_order, property_type,
+    mean_error_centroid, mean_error_corrected,
+    rmse_sd_exact_centroid, rmse_sd_exact_corrected,
+    rmse_improvement_percent
+  )
+]
+setorder(
+  weighted_regressor_summary,
+  outcome_order, geo_order, property_order
+)
+```
+
+# Transaction map
+
+The dated v10 analysis layer retains the transaction coordinates. This chunk
+checks for point geometry and creates an offline map over the official ABS
+2021 NSW state boundary, without an API dependency. If a coordinate-bearing
+source is unavailable, it copies the existing
+manuscript map into the generated-output tree and records the fallback
+explicitly in `map_status.csv`.
+
+```{r transaction-map}
+map_status <- data.table(status = "not run", source = NA_character_, note = NA_character_)
+
+find_point_source <- function(paths) {
+  for (path in paths[file.exists(paths)]) {
+    layer <- sf::st_layers(path)$name[[1L]]
+    layer_sql <- gsub('"', '""', layer, fixed = TRUE)
+    probe <- tryCatch(
+      sf::st_read(
+        path,
+        query = sprintf('SELECT * FROM "%s" LIMIT 1', layer_sql),
+        quiet = TRUE
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(probe) && inherits(probe, "sf") && nrow(probe) &&
+        any(grepl("POINT", as.character(sf::st_geometry_type(probe))))) {
+      return(path)
+    }
+  }
+  NA_character_
+}
+
+map_candidates <- c(
+    file.path(
+      PROJECT_ROOT, "Data", "Intermediate",
+      "transactions_with_GNAF_and_amenities_2022_2025_revision.gpkg"
+    ),
+    DATA_FILE
+)
+point_source <- find_point_source(map_candidates)
+state_boundary_path <- file.path(
+  PROJECT_ROOT, "Data", "Inputs", "Boundaries",
+  "STE_2021_AUST_GDA2020.shp"
+)
+map_png <- file.path(FIGURE_DIR, "transaction_map.png")
+map_pdf <- file.path(FIGURE_DIR, "transaction_map.pdf")
+
+if (!is.na(point_source)) {
+    nsw_boundary <- sf::st_read(state_boundary_path, quiet = TRUE)
+    nsw_boundary <- nsw_boundary[nsw_boundary$STE_CODE21 == "1", ]
+    nsw_boundary <- sf::st_transform(nsw_boundary, 4326)
+
+    points <- sf::st_read(point_source, quiet = TRUE)
+    points <- points[
+      !is.na(points$Purchase.price) & !is.na(points$Area) &
+        points$Purchase.price >= 200000 & points$Purchase.price < 5000000 &
+        points$Area < 10000,
+    ]
+    points <- points[!is.na(points$Property.unit.number), ]
+    points$property_type <- factor(
+      ifelse(points$Property.unit.number == "", "(i) House", "(ii) Apartment"),
+      levels = c("(i) House", "(ii) Apartment")
+    )
+    points <- sf::st_transform(points, 4326)
+    map_plot <- ggplot() +
+      geom_sf(
+        data = nsw_boundary,
+        fill = "#f2f2f2", colour = "#3f3f3f", linewidth = 0.45
+      ) +
+      geom_sf(
+        data = points,
+        colour = "#b2182b", size = 0.055, alpha = 0.18
+      ) +
+      facet_wrap(~property_type, nrow = 1) +
+      coord_sf(
+        xlim = c(140.8, 154.0), ylim = c(-37.8, -27.8),
+        datum = sf::st_crs(4326), expand = FALSE
+      ) +
+      labs(x = "Longitude", y = "Latitude") +
+      theme_minimal(base_size = 10) +
+      theme(
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = "#e6e6e6", linewidth = 0.3),
+        panel.background = element_rect(fill = "white", colour = NA),
+        panel.border = element_rect(colour = "#666666", fill = NA),
+        strip.text = element_text(face = "bold"),
+        strip.background = element_rect(fill = "white", colour = NA)
+      )
+    ggsave(map_png, map_plot, width = 10, height = 6, dpi = 300)
+    ggsave(map_pdf, map_plot, width = 10, height = 6)
+    file.copy(map_png, file.path(FIGURE_DIR, "map_300dpi.png"), overwrite = TRUE)
+    map_status <- data.table(
+      status = "generated from coordinates", source = point_source,
+      note = paste(
+        "Offline ggplot2/sf map over the ABS 2021 NSW state boundary;",
+        "no web-map API required."
+      )
+    )
+} else {
+    legacy_map <- file.path(
+      PROJECT_ROOT, "Data", "Inputs", "transaction_map_reference.png"
+    )
+    if (!file.exists(legacy_map)) stop("No coordinate source or legacy map is available")
+    file.copy(legacy_map, map_png, overwrite = TRUE)
+    file.copy(legacy_map, file.path(FIGURE_DIR, "map_300dpi.png"), overwrite = TRUE)
+    map_status <- data.table(
+      status = "legacy fallback", source = legacy_map,
+      note = paste(
+        "The analysis GPKG has no geometry. Re-run Data Preparation while",
+        "retaining geometry to regenerate this figure from coordinates."
+      )
+    )
+}
+fwrite(map_status, file.path(DATA_DIR, "map_status.csv"))
+```
+
+# Publication figures
+
+```{r publication-figures}
+publication_theme <- theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title.position = "plot"
+  )
+
+save_publication_plot <- function(plot, stem, width = 9, height = 6) {
+  ggsave(file.path(FIGURE_DIR, paste0(stem, ".pdf")), plot,
+         width = width, height = height)
+  ggsave(file.path(FIGURE_DIR, paste0(stem, ".png")), plot,
+         width = width, height = height, dpi = 300)
+}
+
+core_gap_data <- copy(
+  paired_results[outcome_key %chin% c("cbd", "shops1")]
+)
+core_gap_data[, geography := factor(
+  geography, levels = c("SA1", "SA2", "Postcode")
+)]
+core_gap_data[, property_type := factor(
+  property_type, levels = c("House", "Apartment")
+)]
+core_gap_data[, specification := factor(
+  paste(geography, fixed_effects, sep = " - "),
+  levels = rev(as.vector(outer(
+    c("SA1", "SA2", "Postcode"), c("No FE", "SA3", "SA4"),
+    paste, sep = " - "
+  )))
+)]
+
+core_gap_plot <- ggplot(
+  core_gap_data,
+  aes(
+    x = relative_change_percent,
+    y = specification,
+    xmin = relative_ci_low,
+    xmax = relative_ci_high,
+    colour = geography
+  )
+) +
+  geom_vline(xintercept = 0, colour = "grey45", linewidth = 0.45) +
+  geom_errorbar(orientation = "y", width = 0.15) +
+  geom_point(size = 2) +
+  facet_grid(property_type ~ outcome) +
+  labs(
+    x = "Relative coefficient change (%)",
+    y = NULL,
+    colour = "Centroid geography",
+    caption = paste(
+      "Zero means no coefficient change. Negative values generally indicate",
+      "attenuation when the benchmark and centroid coefficients have the same sign."
+    )
+  ) +
+  publication_theme
+save_publication_plot(core_gap_plot, "core_coefficient_gaps", 10, 7)
+
+radius_data <- copy(
+  paired_results[outcome_key %chin% c("shops1", "shops2", "shops5")]
+)
+radius_data[, geography := factor(
+  geography, levels = c("SA1", "SA2", "Postcode")
+)]
+radius_data[, property_type := factor(
+  property_type, levels = c("House", "Apartment")
+)]
+radius_data[, radius_km := as.numeric(sub("shops", "", outcome_key))]
+
+radius_plot <- ggplot(
+  radius_data,
+  aes(
+    x = radius_km,
+    y = delta,
+    ymin = ci_low,
+    ymax = ci_high,
+    colour = fixed_effects,
+    group = fixed_effects
+  )
+) +
+  geom_hline(yintercept = 0, colour = "grey45", linewidth = 0.45) +
+  geom_errorbar(width = 0.08, alpha = 0.65) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = c(1, 2, 5)) +
+  facet_grid(property_type ~ geography, scales = "free_y") +
+  labs(
+    x = "Shop-count radius (km)",
+    y = "Coefficient gap (centroid minus exact)",
+    colour = "Fixed effects",
+    caption = "Intervals are paired spatial-cluster bootstrap intervals for the coefficient gap."
+  ) +
+  publication_theme
+save_publication_plot(
+  radius_plot, "shop_radius_coefficient_gaps", 10, 6.5
+)
+
+distribution_keys <- unique(
+  bootstrap_draws[, .(outcome_key, geo_key, property_key, fe_key)]
+)
+distribution_summary <- merge(
+  distribution_keys,
+  paired_results[, .(
+    outcome_key, geo_key, property_key, fe_key,
+    outcome, geography, property_type, fixed_effects,
+    observed_delta = delta, ci_low, ci_high
+  )],
+  by = c("outcome_key", "geo_key", "property_key", "fe_key")
+)
+distribution_summary[, panel := paste(
+  outcome, geography, property_type, fixed_effects, sep = " - "
+)]
+distribution_data <- copy(bootstrap_draws)
+distribution_data[, panel := paste(
+  outcome, geography, property_type, fixed_effects, sep = " - "
+)]
+
+distribution_plot <- ggplot(distribution_data, aes(x = delta)) +
+  geom_vline(xintercept = 0, colour = "grey35", linewidth = 0.45) +
+  geom_density(fill = "#56B4E9", colour = "#0072B2", alpha = 0.35) +
+  geom_vline(
+    data = distribution_summary,
+    aes(xintercept = observed_delta),
+    colour = "#D55E00",
+    linewidth = 0.7
+  ) +
+  geom_vline(
+    data = distribution_summary,
+    aes(xintercept = ci_low),
+    colour = "#D55E00",
+    linetype = "dashed",
+    linewidth = 0.45
+  ) +
+  geom_vline(
+    data = distribution_summary,
+    aes(xintercept = ci_high),
+    colour = "#D55E00",
+    linetype = "dashed",
+    linewidth = 0.45
+  ) +
+  facet_wrap(~panel, scales = "free", ncol = 2) +
+  labs(
+    x = "Paired bootstrap coefficient gap",
+    y = "Density",
+    caption = paste(
+      "Black: no difference. Orange: observed gap.",
+      "Dashed orange: paired 95% interval."
+    )
+  ) +
+  publication_theme
+save_publication_plot(
+  distribution_plot, "paired_bootstrap_gap_distributions", 10, 7
+)
+
+if (nrow(subsample_plot_data)) {
+  make_subsample_plot <- function(data, outcome_value, measure, y_label, stem) {
+    plot_data <- data[outcome_key == outcome_value & !is.na(get(measure))]
+    plot_data[, sample := factor(sample, levels = sample_definitions$sample)]
+    plot_data[, geography := factor(
+      geography, levels = c("SA1", "SA2", "Postcode")
+    )]
+    plot_data[, series := factor(
+      paste(property_type, fixed_effects, sep = " - "),
+      levels = as.vector(t(outer(
+        c("House", "Apartment"), c("No FE", "SA3", "SA4"),
+        paste, sep = " - "
+      )))
+    )]
+    plot <- ggplot(
+      plot_data,
+      aes(x = sample, y = get(measure), fill = series)
+    ) +
+      geom_hline(yintercept = 0, colour = "grey55", linewidth = 0.35) +
+      geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+      facet_wrap(~geography, ncol = 1, scales = "free_y") +
+      labs(
+        x = NULL, y = y_label, fill = NULL,
+        caption = "Specifications with no focal-regressor variation are not estimable and are omitted."
+      ) +
+      publication_theme +
+      theme(axis.text.x = element_text(angle = 25, hjust = 1))
+    save_publication_plot(plot, stem, 8, 10)
+  }
+
+  make_subsample_plot(
+    subsample_plot_data, "cbd", "delta",
+    "Centroid coefficient minus exact-coordinate coefficient",
+    "subsample_cbd_coefficient_gaps"
+  )
+  make_subsample_plot(
+    subsample_plot_data, "cbd", "se_difference",
+    "Centroid SE minus benchmark SE",
+    "subsample_cbd_standard_error_gaps"
+  )
+  make_subsample_plot(
+    subsample_plot_data, "shops1", "delta",
+    "Centroid coefficient minus exact-coordinate coefficient",
+    "subsample_shops_coefficient_gaps"
+  )
+  make_subsample_plot(
+    subsample_plot_data, "shops1", "se_difference",
+    "Centroid SE minus benchmark SE",
+    "subsample_shops_standard_error_gaps"
+  )
+
+}
+```
+
+# Machine-readable exports
+
+```{r data-exports}
+fwrite(sample_cleaning_flow, file.path(DATA_DIR, "sample_cleaning_flow.csv"))
+fwrite(ambiguous_match_summary, file.path(DATA_DIR, "ambiguous_match_details.csv"))
+fwrite(ambiguous_counts, file.path(DATA_DIR, "ambiguous_matches_summary.csv"))
+fwrite(ambiguity_by_property, file.path(DATA_DIR, "ambiguous_matches_by_property.csv"))
+fwrite(descriptive_long, file.path(DATA_DIR, "descriptive_statistics_long.csv"))
+fwrite(descriptive_table, file.path(DATA_DIR, "descriptive_statistics_wide.csv"))
+fwrite(measurement_diagnostics, file.path(DATA_DIR, "measurement_error_diagnostics.csv"))
+fwrite(paired_results, file.path(DATA_DIR, "paired_coefficient_results.csv"))
+fwrite(
+  paired_results[family == "primary"],
+  file.path(DATA_DIR, "paired_primary_72_results.csv")
+)
+fwrite(
+  paired_results[family == "additional"],
+  file.path(DATA_DIR, "paired_additional_spatial_results.csv")
+)
+fwrite(bootstrap_draws, file.path(DATA_DIR, "representative_bootstrap_draws.csv"))
+fwrite(fwl_results, file.path(DATA_DIR, "fwl_decomposition_results.csv"))
+fwrite(corrected_results, file.path(DATA_DIR, "corrected_centroid_results.csv"))
+fwrite(
+  weighted_regressor_summary,
+  file.path(DATA_DIR, "weighted_centroid_regressor_summary.csv")
+)
+fwrite(
+  additional_variable_summary,
+  file.path(DATA_DIR, "additional_spatial_variable_summary.csv")
+)
+if (ncol(subsample_results)) {
+  fwrite(subsample_results, file.path(DATA_DIR, "subsample_results.csv"))
+} else {
+  writeLines("", file.path(DATA_DIR, "subsample_results.csv"))
+}
+fwrite(transaction_region_summary, file.path(DATA_DIR, "transaction_region_summary.csv"))
+fwrite(regional_attribute_summary, file.path(DATA_DIR, "regional_attribute_summary.csv"))
+```
+
+# LaTeX tables generated with modelsummary
+
+```{r latex-table-functions}
+format_number <- function(x, digits = 4L) {
+  ifelse(is.na(x), "", formatC(x, format = "f", digits = digits))
+}
+
+format_integer <- function(x) {
+  ifelse(is.na(x), "", format(round(x), big.mark = ",", scientific = FALSE))
+}
+
+format_model_cell <- function(beta, se) {
+  ifelse(
+    is.na(beta) | is.na(se), "",
+    paste0(format_number(beta), " (", format_number(se), ")")
+  )
+}
+
+format_interval <- function(low, high) {
+  ifelse(
+    is.na(low) | is.na(high), "",
+    paste0("[", format_number(low), ", ", format_number(high), "]")
+  )
+}
+
+export_latex_table <- function(data, filename, caption, label, notes = "") {
+  tabular <- suppressWarnings(modelsummary::datasummary_df(
+    as.data.frame(data), output = "latex_tabular", fmt = 4,
+    escape = FALSE
+  ))
+  output <- c(
+    "\\begin{table}[!htbp]",
+    "\\centering",
+    paste0("\\caption{", caption, "}"),
+    paste0("\\label{", label, "}"),
+    "\\resizebox{\\textwidth}{!}{%",
+    as.character(tabular),
+    "}",
+    if (nzchar(notes)) paste0(
+      "\\par\\smallskip{\\footnotesize\\raggedright\\textit{Notes}: ",
+      notes, "\\par}"
+    ) else character(),
+    "\\end{table}"
+  )
+  writeLines(output, file.path(TABLE_DIR, filename))
+}
+
+main_results_table_data <- function(data) {
+  data[, .(
+    Geography = geography,
+    `Property type` = property_type,
+    `Fixed effects` = fixed_effects,
+    `Exact coordinate` = format_model_cell(benchmark, benchmark_se),
+    `Centroid proxy` = format_model_cell(centroid, centroid_se),
+    `Gap $\\Delta$` = format_number(delta),
+    `Relative change (\\%)` =
+      format_number(relative_change_percent, 1L),
+    `Paired 95\\% CI` = format_interval(ci_low, ci_high),
+    `FE absorption (\\%)` =
+      format_number(absorption_percent, 1L),
+    N = format_integer(N)
+  )]
+}
+
+diagnostic_table_data <- function(data) {
+  data[, .(
+    `Spatial variable` = outcome,
+    Centroid = geography,
+    `Property type` = property_type,
+    `Mean proxy error` = format_number(mean_proxy_error_raw),
+    `RMSE / SD(exact)` = format_number(rmse_sd_exact),
+    `Exact/proxy variance` =
+      format_number(exact_proxy_variance_ratio),
+    `Corr(exact, error)` = format_number(corr_exact_error),
+    `Corr(proxy, error)` = format_number(corr_proxy_error),
+    N = format_integer(N)
+  )]
+}
+
+weighted_coefficient_table_data <- function(data) {
+  data[, .(
+    Geography = geography,
+    `Property type` = property_type,
+    `Fixed effects` = fixed_effects,
+    `Exact coordinate` = format_model_cell(benchmark, benchmark_se),
+    `Geometric centroid` = format_model_cell(centroid, centroid_se),
+    `Address-weighted centroid` = format_model_cell(corrected, corrected_se),
+    `Geometric gap` = format_number(delta_centroid),
+    `Weighted gap` = format_number(delta_corrected),
+    N = format_integer(N)
+  )]
+}
+
+weighted_regressor_table_data <- function(data) {
+  data[, .(
+    `Spatial variable` = outcome,
+    Geography = geography,
+    `Property type` = property_type,
+    `Geometric mean error` = format_number(mean_error_centroid),
+    `Weighted mean error` = format_number(mean_error_corrected),
+    `Geometric RMSE / SD(exact)` =
+      format_number(rmse_sd_exact_centroid),
+    `Weighted RMSE / SD(exact)` =
+      format_number(rmse_sd_exact_corrected),
+    `RMSE improvement (\\%)` =
+      format_number(rmse_improvement_percent, 1L)
+  )]
+}
+
+fwl_table_data <- function(data) {
+  data[, .(
+    Geography = geography,
+    `Property type` = property_type,
+    `Fixed effects` = fixed_effects,
+    `Coefficient gap` = format_number(delta),
+    `Partial error--outcome covariance` =
+      format_number(covariance_component),
+    `Variance rescaling` = format_number(variance_component),
+    `Conditional exact/proxy variance` =
+      format_number(conditional_variance_ratio),
+    N = format_integer(N)
+  )]
+}
+```
+
+```{r publication-tables}
+cleaning_display <- sample_cleaning_flow[
+  stage %chin% c(
+    "Latest eligible dealing-address sales",
+    "Excluded sales with conflicting model inputs",
+    "Final unambiguous validation sample",
+    "Final houses",
+    "Final apartments"
+  ),
+  .(
+    Stage = stage,
+    Unit = unit,
+    Count = format_integer(count)
+  )
+]
+
+export_latex_table(
+  cleaning_display,
+  "sample_cleaning_flow.tex",
+  "Construction of the Unique Address-Coordinate Validation Sample",
+  "tab:sample-cleaning",
+  paste(
+    "A sale is identified by dealing number and normalized address.",
+    "The latest downloaded record is retained. Rows with identical model",
+    "inputs are collapsed, while sales retaining conflicting exact-coordinate",
+    "or other model inputs are excluded rather than assigned an arbitrary",
+    "G-NAF match."
+  )
+)
+
+export_latex_table(
+  descriptive_table[, .(
+    Variable = label,
+    `House mean` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                          format_integer(mean_House), format_number(mean_House, 2L)),
+    `House median` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                            format_integer(median_House), format_number(median_House, 2L)),
+    `House SD` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                        format_integer(sd_House), format_number(sd_House, 2L)),
+    `Apartment mean` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                              format_integer(mean_Apartment), format_number(mean_Apartment, 2L)),
+    `Apartment median` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                                format_integer(median_Apartment), format_number(median_Apartment, 2L)),
+    `Apartment SD` = ifelse(label %chin% c("Price (AUD)", "Area (sqm)"),
+                            format_integer(sd_Apartment), format_number(sd_Apartment, 2L)),
+    Source = source
+  )],
+  "descriptive_statistics.tex",
+  "Descriptive Statistics of NSW Property Transactions (2022--2025)",
+  "tab:data-sum",
+  paste(
+    "Statistics are calculated for unique dealing-address sales after the",
+    "price and land-area restrictions and exclusion of conflicting",
+    "address-coordinate matches."
+  )
+)
+
+export_latex_table(
+  diagnostic_table_data(
+    measurement_diagnostics[outcome_key %chin% c("cbd", "shops1")]
+  ),
+  "measurement_error_diagnostics.tex",
+  "Measurement-Error Diagnostics for the Primary Spatial Variables",
+  "tab:me-diagnostics",
+  paste(
+    "Error is centroid proxy minus exact-coordinate value.",
+    "Mean error uses raw units. The other columns use the regression",
+    "transformation. RMSE / SD(exact) equals one when proxy RMSE is as",
+    "large as one standard deviation of the exact variable.",
+    "The diagnostics describe error structure; they are not formal tests",
+    "of classical or Berkson measurement error."
+  )
+)
+
+table_labels <- list(
+  cbd = c("CBD Distance", "cbd"),
+  shops1 = c("Shops within 1 km", "shop")
+)
+
+for (outcome_key_value in names(table_labels)) {
+  outcome_title <- table_labels[[outcome_key_value]][[1L]]
+  label_stem <- table_labels[[outcome_key_value]][[2L]]
+  outcome_data <- paired_results[outcome_key == outcome_key_value]
+
+  export_latex_table(
+    main_results_table_data(outcome_data),
+    paste0("core_", outcome_key_value, "_results.tex"),
+    paste0(outcome_title, ": Exact and Centroid-Based Results"),
+    paste0("tab:core-", label_stem),
+    paste(
+      "$\\Delta=\\widehat\\beta_{centroid}-",
+      "\\widehat\\beta_{exact}$.",
+      "Relative change is",
+      "$100(\\widehat\\beta_{centroid}/",
+      "\\widehat\\beta_{exact}-1)$.",
+      "Coefficient-specific standard errors are in parentheses.",
+      "The confidence interval is for $\\Delta$ and uses 999 paired",
+      "one-way spatial-cluster multiplier draws.",
+      "FE absorption is the percentage of proxy variation jointly",
+      "absorbed by the stated spatial and month-by-year fixed effects."
+    )
+  )
+}
+
+export_latex_table(
+  weighted_regressor_table_data(weighted_regressor_summary),
+  "weighted_centroid_regressor_quality.tex",
+  "Regressor Quality of Geometric and Address-Weighted Centroids",
+  "tab:weighted-regressor-quality",
+  paste(
+    "Mean errors use raw units; RMSE measures use the regression",
+    "transformation. Positive improvement means that the address-weighted",
+    "proxy has lower RMSE than the geometric centroid proxy."
+  )
+)
+
+for (outcome_key_value in c("cbd", "shops1")) {
+  outcome_title <- outcomes[outcome_key == outcome_key_value, outcome]
+  label_stem <- if (outcome_key_value == "cbd") "cbd" else "shop"
+  outcome_data <- corrected_results[outcome_key == outcome_key_value]
+
+  export_latex_table(
+    weighted_coefficient_table_data(outcome_data),
+    paste0("weighted_centroid_", outcome_key_value, "_results.tex"),
+    paste0(outcome_title, ": Address-Weighted Centroid Coefficients"),
+    paste0("tab:weighted-", label_stem),
+    paste(
+      "Both gaps are relative to the exact-coordinate coefficient.",
+      "All three regressors are evaluated on the same sample."
+    )
+  )
+}
+
+additional_display <- additional_variable_summary[, .(
+  `Spatial variable` = outcome,
+  Geography = geography,
+  `Largest absolute gap` = format_number(maximum_absolute_gap),
+  `Largest-gap specification` = largest_gap_specification,
+  `95\\% intervals excluding zero` =
+    paste0(intervals_excluding_zero, " / 6"),
+  `BH-adjusted gaps` = paste0(adjusted_gaps, " / 6"),
+  `Sign reversals` = paste0(sign_reversals, " / 6")
+)]
+
+export_latex_table(
+  additional_display,
+  "additional_spatial_variables_summary.tex",
+  "Centroid Sensitivity of Additional Spatial Variables",
+  "tab:additional-spatial-summary",
+  paste(
+    "Each row summarizes two property types and three fixed-effect",
+    "specifications. Gaps are centroid minus exact-coordinate coefficients.",
+    "BH adjustment is applied within each spatial variable across all",
+    "18 geography--property--fixed-effect comparisons."
+  )
+)
+
+fwl_table_labels <- list(
+  cbd = c("CBD Distance", "cbd"),
+  shops1 = c("Shops within 1 km", "shops")
+)
+
+for (outcome_key_value in names(fwl_table_labels)) {
+  outcome_title <- fwl_table_labels[[outcome_key_value]][[1L]]
+  label_stem <- fwl_table_labels[[outcome_key_value]][[2L]]
+  outcome_data <- fwl_publication[outcome_key == outcome_key_value]
+
+  export_latex_table(
+    fwl_table_data(outcome_data),
+    paste0("fwl_", outcome_key_value, "_decomposition.tex"),
+    paste0("Complete Coefficient-Gap Accounting: ", outcome_title),
+    paste0("tab:fwl-", label_stem),
+    paste(
+      "The underlying unrounded partial error--outcome covariance and",
+      "variance-rescaling components sum exactly to the reported",
+      "coefficient gap after partialling out the controls and fixed effects.",
+      "The identity is descriptive and is not a causal decomposition."
+    )
+  )
+}
+
+regional_display <- rbindlist(list(
+  transaction_region_summary[, .(
+    Variable = variable, Geography = "Transaction",
+    Region = region, Mean = format_number(mean, 2L),
+    Median = format_number(median, 2L), SD = format_number(sd, 2L)
+  )],
+  regional_attribute_summary[, .(
+    Variable = variable, Geography = geography,
+    Region = region, Mean = format_number(mean, 2L),
+    Median = format_number(median, 2L), SD = format_number(sd, 2L)
+  )]
+), fill = TRUE)
+regional_labels <- c(
+  Purchase.price = "Price (AUD)",
+  dist_cbd_km = "CBD distance (km)",
+  shops_1km = "Shops within 1 km",
+  area_sa = "Area (hectares)",
+  shr_resid = "Residential share",
+  HS_stat_A = "Clustering statistic",
+  var_circ = "Boundary irregularity"
+)
+regional_display[, Variable := unname(regional_labels[Variable])]
+
+export_latex_table(
+  regional_display,
+  "regional_descriptive_statistics.tex",
+  "Sydney and Non-Sydney Transactions and Geographic Units",
+  "tab:data_summary_syd",
+  "Geographic attributes are summarized over unique units rather than transaction-weighted repeated rows."
+)
+```
+
+# Validation, bundle, and manifest
+
+```{r validation-and-bundle}
+expected_all_pairs <- nrow(outcomes) * 3L * 2L * 3L
+expected_subsamples <- 2L * 3L * 5L * 2L * 3L
+
+validation <- data.table(
+  check = c(
+    "clean sample size", "house sample size", "apartment sample size",
+    "all paired rows", "FWL rows", "FWL identity",
+    "corrected rows", "diagnostic rows", "subsample rows",
+    "subsample non-estimable rows"
+  ),
+  expected = c(
+    340856,
+    281621,
+    59235,
+    expected_all_pairs,
+    36,
+    1e-8,
+    36,
+    nrow(outcomes) * 3L * 2L,
+    expected_subsamples,
+    NA
+  ),
+  observed = c(
+    nrow(transactions),
+    transactions[house == TRUE, .N],
+    transactions[house == FALSE, .N],
+    nrow(paired_results),
+    nrow(fwl_results),
+    max(abs(fwl_results$identity_error), na.rm = TRUE),
+    nrow(corrected_results),
+    nrow(measurement_diagnostics),
+    nrow(subsample_results),
+    sum(grepl("^not estimable", subsample_results$status))
+  )
+)
+validation[, pass := ifelse(
+  is.na(expected), TRUE,
+  ifelse(check == "FWL identity", observed < expected, observed == expected)
+)]
+fwrite(validation, file.path(DATA_DIR, "validation_checks.csv"))
+
+run_config <- data.table(
+  run_time = as.character(Sys.time()),
+  bootstrap_reps = BOOTSTRAP_REPS,
+  bootstrap_seed = BOOTSTRAP_SEED,
+  transaction_rows = nrow(transactions),
+  data_file = DATA_FILE
+)
+fwrite(run_config, file.path(DATA_DIR, "run_configuration.csv"))
+
+results_bundle <- list(
+  configuration = run_config,
+  validation = validation,
+  sample_cleaning_flow = sample_cleaning_flow,
+  ambiguous_match_summary = ambiguous_match_summary,
+  ambiguity_by_property = ambiguity_by_property,
+  descriptive_statistics = descriptive_long,
+  measurement_diagnostics = measurement_diagnostics,
+  paired_results = paired_results,
+  representative_bootstrap_draws = bootstrap_draws,
+  fwl_results = fwl_results,
+  fwl_publication = fwl_publication,
+  corrected_results = corrected_results,
+  weighted_regressor_summary = weighted_regressor_summary,
+  additional_variable_summary = additional_variable_summary,
+  subsample_results = subsample_results,
+  transaction_region_summary = transaction_region_summary,
+  regional_attribute_summary = regional_attribute_summary,
+  map_status = map_status
+)
+saveRDS(results_bundle, file.path(OUTPUT_DIR, "v10_results.rds"), compress = "xz")
+package_versions <- vapply(
+  packages_used,
+  function(package) as.character(utils::packageVersion(package)),
+  FUN.VALUE = character(1)
+)
+writeLines(
+  c(
+    R.version.string,
+    paste(names(package_versions), package_versions, sep = ": ")
+  ),
+  file.path(OUTPUT_DIR, "session-info.txt")
+)
+
+all_output_files <- list.files(OUTPUT_DIR, recursive = TRUE, full.names = TRUE)
+output_prefix_length <- nchar(normalizePath(OUTPUT_DIR, mustWork = TRUE)) + 2L
+manifest <- data.table(
+  file = substring(normalizePath(all_output_files, mustWork = TRUE), output_prefix_length),
+  bytes = file.info(all_output_files)$size,
+  md5 = unname(tools::md5sum(all_output_files))
+)
+manifest <- manifest[file != "manifest.csv"]
+fwrite(manifest, file.path(OUTPUT_DIR, "manifest.csv"))
+
+validation
+```
+
+# Run interpretation
+
+The manuscript and response letter must be updated only from the exported
+objects. In particular:
+
+- coefficient-specific standard errors do not provide inference for
+  \(\Delta\);
+- the paired bootstrap is a one-way spatial-cluster influence-function
+  multiplier bootstrap, assumes independence across released-geography
+  clusters after conditioning, and does not re-estimate every model in every
+  draw;
+- RMSE / SD(exact), variance ratios, and correlations are diagnostics rather than tests
+  that separately identify classical and Berkson errors;
+- a positive address-weighted RMSE improvement is direct evidence that the
+  correction improves the regressor, even if a particular price coefficient
+  happens to move toward the benchmark.

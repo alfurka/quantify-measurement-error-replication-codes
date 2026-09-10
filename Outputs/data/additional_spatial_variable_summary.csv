@@ -1,0 +1,10 @@
+outcome_order,outcome,geo_order,geography,maximum_absolute_gap,largest_gap_specification,intervals_excluding_zero,adjusted_gaps,sign_reversals
+5,Hospital distance,1,SA1,0.00339314365586807,"House, No FE",3,3,0
+5,Hospital distance,2,SA2,0.0444015995892615,"House, No FE",2,2,0
+5,Hospital distance,3,Postcode,0.0797093007597813,"House, No FE",5,5,2
+6,Park distance,1,SA1,0.0179090833311593,"Apartment, No FE",6,2,1
+6,Park distance,2,SA2,0.0586725069345908,"House, No FE",3,2,1
+6,Park distance,3,Postcode,0.054915607582867,"House, No FE",2,1,2
+7,Rail distance,1,SA1,0.00517692619854857,"Apartment, SA3",4,3,0
+7,Rail distance,2,SA2,0.0119813814854283,"Apartment, SA3",0,0,1
+7,Rail distance,3,Postcode,0.0285508059055419,"House, No FE",2,1,1

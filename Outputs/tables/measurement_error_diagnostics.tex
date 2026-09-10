@@ -1,0 +1,23 @@
+\begin{table}[!htbp]
+\centering
+\caption{Measurement-Error Diagnostics for the Primary Spatial Variables}
+\label{tab:me-diagnostics}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllllllll}
+Spatial variable & Centroid & Property type & Mean proxy error & RMSE / SD(exact) & Exact/proxy variance & Corr(exact, error) & Corr(proxy, error) & N \\
+CBD distance & SA1 & House & -0.0067 & 0.0061 & 0.9999 & 0.0072 & 0.0132 & 281,621 \\
+CBD distance & SA1 & Apartment & 0.0082 & 0.0129 & 0.9990 & 0.0308 & 0.0437 & 59,235 \\
+CBD distance & SA2 & House & 0.1240 & 0.0391 & 1.0039 & -0.0691 & -0.0302 & 281,621 \\
+CBD distance & SA2 & Apartment & 0.0322 & 0.0595 & 0.9988 & -0.0192 & 0.0402 & 59,235 \\
+CBD distance & Postcode & House & 0.8768 & 0.0649 & 1.0053 & -0.0731 & -0.0091 & 281,503 \\
+CBD distance & Postcode & Apartment & 0.4182 & 0.2151 & 0.8949 & 0.1654 & 0.3599 & 59,222 \\
+Shops within 1 km & SA1 & House & -0.6374 & 0.4425 & 0.9949 & -0.2152 & 0.2262 & 281,621 \\
+Shops within 1 km & SA1 & Apartment & -0.0962 & 0.3553 & 0.9922 & -0.1666 & 0.1879 & 59,235 \\
+Shops within 1 km & SA2 & House & 2.4571 & 1.0865 & 0.8627 & -0.4668 & 0.5704 & 281,621 \\
+Shops within 1 km & SA2 & Apartment & -16.9526 & 0.9600 & 0.6929 & -0.2255 & 0.5851 & 59,235 \\
+Shops within 1 km & Postcode & House & -0.4325 & 1.1392 & 0.8857 & -0.4889 & 0.5709 & 281,503 \\
+Shops within 1 km & Postcode & Apartment & -32.7881 & 1.2370 & 0.6203 & -0.3055 & 0.6615 & 59,222 \\
+\end{tabular}
+}
+\par\smallskip{\footnotesize\raggedright\textit{Notes}: Error is centroid proxy minus exact-coordinate value. Mean error uses raw units. The other columns use the regression transformation. RMSE / SD(exact) equals one when proxy RMSE is as large as one standard deviation of the exact variable. The diagnostics describe error structure; they are not formal tests of classical or Berkson measurement error.\par}
+\end{table}

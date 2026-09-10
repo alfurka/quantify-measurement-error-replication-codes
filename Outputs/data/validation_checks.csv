@@ -1,0 +1,11 @@
+check,expected,observed,pass
+clean sample size,340856,340856,TRUE
+house sample size,281621,281621,TRUE
+apartment sample size,59235,59235,TRUE
+all paired rows,126,126,TRUE
+FWL rows,36,36,TRUE
+FWL identity,0.00000001,0.0000000000000000625584653524136,TRUE
+corrected rows,36,36,TRUE
+diagnostic rows,42,42,TRUE
+subsample rows,180,180,TRUE
+subsample non-estimable rows,,9,TRUE

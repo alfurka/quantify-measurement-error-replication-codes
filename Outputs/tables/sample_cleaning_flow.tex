@@ -1,0 +1,16 @@
+\begin{table}[!htbp]
+\centering
+\caption{Construction of the Unique Address-Coordinate Validation Sample}
+\label{tab:sample-cleaning}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lll}
+Stage & Unit & Count \\
+Latest eligible dealing-address sales & Sales & 343,821 \\
+Excluded sales with conflicting model inputs & Sales & 2,965 \\
+Final unambiguous validation sample & Sales & 340,856 \\
+Final houses & Sales & 281,621 \\
+Final apartments & Sales & 59,235 \\
+\end{tabular}
+}
+\par\smallskip{\footnotesize\raggedright\textit{Notes}: A sale is identified by dealing number and normalized address. The latest downloaded record is retained. Rows with identical model inputs are collapsed, while sales retaining conflicting exact-coordinate or other model inputs are excluded rather than assigned an arbitrary G-NAF match.\par}
+\end{table}
