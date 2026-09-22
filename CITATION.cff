@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use these replication materials, please cite the associated article."
+title: "Replication materials for Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids"
+authors:
+  - family-names: "Kalay"
+    given-names: "Ali Furkan"
+  - family-names: "Wen"
+    given-names: "Henry"
+repository-code: "https://github.com/alfurka/quantify-measurement-error-replication-codes"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Kalay"
+      given-names: "Ali Furkan"
+    - family-names: "Wen"
+      given-names: "Henry"
+  title: "Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids"
+  journal: "Economic Record"
+  year: 2026
+  doi: "10.1111/1475-4932.70072"
+  url: "https://doi.org/10.1111/1475-4932.70072"
