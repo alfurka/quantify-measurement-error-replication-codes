@@ -1,10 +1,30 @@
 # Replication materials
 
-This public package accompanies “Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids” by Ali Furkan Kalay and Henry Wen, accepted for publication in *Economic Record*. It contains the analysis code, saved aggregate outputs, software information, data-source instructions, and checksums for the files used by the authors.
+This public package accompanies “Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids” by Ali Furkan Kalay and Henry Wen, published in *Economic Record*. The open-access article is available at [https://doi.org/10.1111/1475-4932.70072](https://doi.org/10.1111/1475-4932.70072). It contains the analysis code, saved aggregate outputs, software information, data-source instructions, and checksums for the files used by the authors.
 
 The public repository is [https://github.com/alfurka/quantify-measurement-error-replication-codes](https://github.com/alfurka/quantify-measurement-error-replication-codes).
 
 The workflow begins with prepared inputs. It does not automate every original download and upstream cleaning step.
+
+
+## Citation
+
+If you use these replication materials, please cite the published article:
+
+> Kalay, Ali Furkan, and Henry Wen. 2026. “Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids.” *Economic Record*. https://doi.org/10.1111/1475-4932.70072
+
+BibTeX:
+
+```bibtex
+@article{kalay_wen_2026_lost_in_aggregation,
+  author  = {Kalay, Ali Furkan and Wen, Henry},
+  title   = {Lost in Aggregation: Quantifying Measurement Error from Geographic Centroids},
+  journal = {Economic Record},
+  year    = {2026},
+  doi     = {10.1111/1475-4932.70072},
+  url     = {https://doi.org/10.1111/1475-4932.70072}
+}
+```
 
 ## Support and updates
 
